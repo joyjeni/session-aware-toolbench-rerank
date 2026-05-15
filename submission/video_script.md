@@ -90,7 +90,7 @@ score(q, a | H) = w_base · sim(q, a)
 
 **On screen:** End card showing:
 - 💻 github.com/joyjeni/session-aware-toolbench-rerank
-- 📓 Colab: gemma4_full_train.ipynb
+- 📓 Notebooks: kaggle_gemma4_full_train.ipynb / colab_gemma4_full_train.ipynb
 - 🌐 web-three-blush-75.vercel.app
 
 **Voiceover:**
@@ -128,6 +128,7 @@ score(q, a | H) = w_base · sim(q, a)
 SessionRerank-Gemma is our submission to the Gemma 4 Good Hackathon (Special Technology / Function Calling + Impact / Future of Education tracks). We give Gemma 4 agents a session-history prior that improves API retrieval by +14.7% NDCG@5 on ToolBench — enabling on-device AI tutors that remember the conversation.
 
 🔗 Code: https://github.com/joyjeni/session-aware-toolbench-rerank
-🔗 Colab: https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/gemma4_full_train.ipynb
+🔗 Kaggle notebook: https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/kaggle_gemma4_full_train.ipynb
+🔗 Colab notebook:  https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/colab_gemma4_full_train.ipynb
 🔗 Live demo: https://web-three-blush-75.vercel.app
 ```

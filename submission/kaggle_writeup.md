@@ -11,7 +11,7 @@
 
 - 📊 Live dashboard with interactive demo → https://web-three-blush-75.vercel.app
 - 💻 Code (MIT license) → https://github.com/joyjeni/session-aware-toolbench-rerank
-- 📓 One-click Colab reproduction → [`notebooks/gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/gemma4_full_train.ipynb)
+- 📓 One-click reproduction → [`notebooks/kaggle_gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/kaggle_gemma4_full_train.ipynb) (Kaggle) or [`notebooks/colab_gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/colab_gemma4_full_train.ipynb) (Colab)
 - 📐 Method paper → [`paper/method.md`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/paper/method.md)
 
 ---
@@ -56,7 +56,7 @@ All three plug into the same `score()` interface — same eval harness, same sig
 | **GemmaRerank cascade (270m-it)** | *populated by Colab* | *populated* | Top-100 → YES/NO logit |
 | **SessionRerank-Gemma (ours)** | *populated by Colab* | *populated* | LoRA-fine-tuned Gemma 4 |
 
-> Numbers marked *populated by Colab* are filled in by the [one-click notebook](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/gemma4_full_train.ipynb) — they appear automatically in `results/metrics.json` and on the live dashboard once you run training. Peak per-split gain on the MiniLM version reaches **+20.7% NDCG@5** on G2_instruction (multi-tool sessions, where history matters most).
+> Numbers marked *populated by Colab* are filled in by the one-click [Kaggle](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/kaggle_gemma4_full_train.ipynb) or [Colab](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/colab_gemma4_full_train.ipynb) notebook — they appear automatically in `results/metrics.json` and on the live dashboard once you run training. Peak per-split gain on the MiniLM version reaches **+20.7% NDCG@5** on G2_instruction (multi-tool sessions, where history matters most).
 
 **Statistical significance.** Paired Wilcoxon signed-rank test, SessionRerank vs Dense, per-query NDCG@5: **p < 1e-4** on G1_instruction, G1_category, G2_instruction, G2_category.
 
@@ -95,7 +95,7 @@ Three concrete tutor scenarios the system unlocks:
 
 Everything is fully reproducible from one notebook on a free Colab T4 (~50 min):
 
-1. Open [`notebooks/gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/gemma4_full_train.ipynb) in Colab.
+1. Open [`notebooks/kaggle_gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/kaggle_gemma4_full_train.ipynb) on Kaggle (or [`colab_gemma4_full_train.ipynb`](https://github.com/joyjeni/session-aware-toolbench-rerank/blob/main/notebooks/colab_gemma4_full_train.ipynb) on Colab).
 2. Paste a Hugging Face token (Gemma is gated).
 3. Run all cells. The final cell *optionally* pushes results back to GitHub, which triggers a Vercel redeploy — your dashboard reflects the new numbers within a minute.
 

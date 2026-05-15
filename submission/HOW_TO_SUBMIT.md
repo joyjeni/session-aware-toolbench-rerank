@@ -11,7 +11,7 @@ Kaggle hackathons accept submissions as **Kaggle Writeups** (a special kind of N
 |---|----------|--------|----------|
 | 1 | Accept rules & join competition | ☐ Click "Join Competition" | [competition page](https://www.kaggle.com/competitions/gemma-4-good-hackathon) |
 | 2 | Public/visible GitHub repo | ✅ Done | https://github.com/joyjeni/session-aware-toolbench-rerank — flip to *public* before submitting |
-| 3 | Reproducible Colab notebook | ✅ Done | `notebooks/gemma4_full_train.ipynb` |
+| 3 | Reproducible notebook (Kaggle or Colab) | ✅ Done | `notebooks/kaggle_gemma4_full_train.ipynb` and `notebooks/colab_gemma4_full_train.ipynb` |
 | 4 | Writeup markdown | ✅ Done | `submission/kaggle_writeup.md` |
 | 5 | Live demo URL | ✅ Done | https://web-three-blush-75.vercel.app |
 | 6 | Demo video (3–5 min) on YouTube | ☐ Record using `submission/video_script.md` | YouTube (unlisted is fine) |
@@ -41,7 +41,7 @@ Kaggle hackathons accept submissions as **Kaggle Writeups** (a special kind of N
 
 4. **Save the Colab notebook to Kaggle.**
    - On the competition page click **Code → New Notebook**.
-   - File → Import Notebook → upload `notebooks/gemma4_full_train.ipynb` (or paste the GitHub URL).
+   - File → Import Notebook → upload `notebooks/kaggle_gemma4_full_train.ipynb` (or paste the GitHub URL).
    - Click "Save Version" → "Save & Run All (Commit)". You don't actually need to run it on Kaggle — the act of saving as a notebook tied to the competition is what registers your code submission.
 
 5. **Create the Writeup.**
