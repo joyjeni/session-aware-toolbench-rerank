@@ -1,0 +1,101 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[run_all] device=cpu  encoder=sentence-transformers/all-MiniLM-L6-v2
+[run_all] corpus=3211 APIs
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 14502.93it/s]
+/home/user/workspace/sessionrerank/src/sessionrerank/model/session_rerank.py:219: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:838.)
+  f"w_base={float(torch.exp(w[0])):.3f}  w_cat={float(torch.exp(w[1])):.3f}  "
+[run_all] retrievers ready in 52.1s
+[run_all] fitting SessionRerank weights …
+[fit] training tuples: 3501
+[fit] epoch 1/3  loss=0.3506  w_base=0.872  w_cat=3.903  w_sch=0.217  w_ept=5.176
+[fit] epoch 2/3  loss=0.3528  w_base=0.411  w_cat=4.048  w_sch=1.023  w_ept=0.845
+[fit] epoch 3/3  loss=0.3698  w_base=1.395  w_cat=1.169  w_sch=0.310  w_ept=0.103
+[run_all] learned: {'w_base': 1.394763469696045, 'w_cat': 1.168823480606079, 'w_sch': 0.3097955584526062, 'w_ept': 0.10273905098438263}
+
+=== G1_instruction ===
+  closed   | BM25                           | NDCG@5=0.908  Hit@5=1.000   (3.6s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.890  Hit@5=1.000   (4.6s)
+  closed   | ToolRerank                     | NDCG@5=0.890  Hit@5=1.000   (9.2s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.890  Hit@5=1.000   (4.5s)
+  open     | BM25                           | NDCG@5=0.617  Hit@5=0.805   (4.1s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.583  Hit@5=0.815   (5.4s)
+  open     | ToolRerank                     | NDCG@5=0.579  Hit@5=0.730   (14.4s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.583  Hit@5=0.815   (5.2s)
+  session  | BM25                           | NDCG@5=0.627  Hit@5=0.806   (3.7s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.573  Hit@5=0.812   (5.0s)
+  session  | ToolRerank                     | NDCG@5=0.573  Hit@5=0.726   (13.3s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.651  Hit@5=0.860   (5.8s)
+
+=== G1_tool ===
+  closed   | BM25                           | NDCG@5=0.906  Hit@5=0.990   (3.3s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.887  Hit@5=0.995   (4.4s)
+  closed   | ToolRerank                     | NDCG@5=0.887  Hit@5=0.995   (8.8s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.887  Hit@5=0.995   (4.4s)
+  open     | BM25                           | NDCG@5=0.511  Hit@5=0.690   (3.8s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.529  Hit@5=0.760   (5.3s)
+  open     | ToolRerank                     | NDCG@5=0.561  Hit@5=0.705   (14.1s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.529  Hit@5=0.760   (5.1s)
+  session  | BM25                           | NDCG@5=0.518  Hit@5=0.706   (3.5s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.529  Hit@5=0.770   (5.0s)
+  session  | ToolRerank                     | NDCG@5=0.563  Hit@5=0.711   (13.3s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.587  Hit@5=0.829   (5.8s)
+
+=== G1_category ===
+  closed   | BM25                           | NDCG@5=0.918  Hit@5=0.995   (3.2s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.929  Hit@5=1.000   (4.2s)
+  closed   | ToolRerank                     | NDCG@5=0.929  Hit@5=1.000   (8.5s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.929  Hit@5=1.000   (4.4s)
+  open     | BM25                           | NDCG@5=0.477  Hit@5=0.645   (3.4s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.557  Hit@5=0.785   (4.9s)
+  open     | ToolRerank                     | NDCG@5=0.591  Hit@5=0.745   (14.0s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.557  Hit@5=0.785   (4.9s)
+  session  | BM25                           | NDCG@5=0.481  Hit@5=0.652   (3.5s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.553  Hit@5=0.783   (5.0s)
+  session  | ToolRerank                     | NDCG@5=0.587  Hit@5=0.742   (14.0s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.620  Hit@5=0.838   (6.2s)
+
+=== G2_instruction ===
+  closed   | BM25                           | NDCG@5=0.873  Hit@5=0.995   (3.8s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.849  Hit@5=1.000   (4.7s)
+  closed   | ToolRerank                     | NDCG@5=0.832  Hit@5=1.000   (9.2s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.849  Hit@5=1.000   (4.8s)
+  open     | BM25                           | NDCG@5=0.495  Hit@5=0.765   (4.5s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.412  Hit@5=0.750   (5.3s)
+  open     | ToolRerank                     | NDCG@5=0.421  Hit@5=0.710   (14.7s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.412  Hit@5=0.750   (5.4s)
+  session  | BM25                           | NDCG@5=0.487  Hit@5=0.761   (4.0s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.412  Hit@5=0.761   (4.9s)
+  session  | ToolRerank                     | NDCG@5=0.417  Hit@5=0.712   (13.4s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.498  Hit@5=0.832   (5.8s)
+
+=== G2_category ===
+  closed   | BM25                           | NDCG@5=0.901  Hit@5=0.995   (3.6s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.881  Hit@5=0.995   (4.5s)
+  closed   | ToolRerank                     | NDCG@5=0.871  Hit@5=0.995   (8.8s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.881  Hit@5=0.995   (4.9s)
+  open     | BM25                           | NDCG@5=0.398  Hit@5=0.665   (4.3s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.336  Hit@5=0.615   (5.2s)
+  open     | ToolRerank                     | NDCG@5=0.347  Hit@5=0.610   (14.4s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.336  Hit@5=0.615   (5.2s)
+  session  | BM25                           | NDCG@5=0.398  Hit@5=0.663   (4.2s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.334  Hit@5=0.613   (5.4s)
+  session  | ToolRerank                     | NDCG@5=0.343  Hit@5=0.608   (14.8s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.398  Hit@5=0.693   (6.3s)
+
+=== G3_instruction ===
+  closed   | BM25                           | NDCG@5=0.876  Hit@5=1.000   (1.8s)
+  closed   | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.793  Hit@5=1.000   (2.2s)
+  closed   | ToolRerank                     | NDCG@5=0.763  Hit@5=1.000   (4.3s)
+  closed   | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.793  Hit@5=1.000   (2.1s)
+  open     | BM25                           | NDCG@5=0.326  Hit@5=0.750   (1.9s)
+  open     | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.304  Hit@5=0.620   (2.5s)
+  open     | ToolRerank                     | NDCG@5=0.306  Hit@5=0.620   (7.1s)
+  open     | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.304  Hit@5=0.620   (2.6s)
+  session  | BM25                           | NDCG@5=0.326  Hit@5=0.750   (2.0s)
+  session  | Dense (all-MiniLM-L6-v2)       | NDCG@5=0.304  Hit@5=0.620   (2.5s)
+  session  | ToolRerank                     | NDCG@5=0.306  Hit@5=0.620   (7.4s)
+  session  | SessionRerank(Dense (all-MiniLM-L6-v2)) | NDCG@5=0.340  Hit@5=0.670   (3.3s)
+
+[run_all] wrote /home/user/workspace/sessionrerank/results/metrics.json
+[run_all] total time: 549.9s

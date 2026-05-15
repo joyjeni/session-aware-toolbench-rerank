@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+data/toolbench_hf/
+data/cache/
+.embeddings/
+.next/
+node_modules/
+.vercel/
+*.npy
+*.bin
+*.pt
+.DS_Store
