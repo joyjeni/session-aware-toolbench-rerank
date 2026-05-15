@@ -189,7 +189,9 @@ class SessionRerank:
                  w_cooc: float = 0.0,
                  w_rec: float = 0.0,
                  cooc_prior: CooccurrencePrior | None = None,
-                 temperature: float = 1.0):
+                 feat_stats: dict | None = None,
+                 temperature: float = 1.0,
+                 **_ignored):
         self.base = base
         self.w_base = w_base
         self.w_cat = w_cat
@@ -198,6 +200,14 @@ class SessionRerank:
         self.w_cooc = w_cooc
         self.w_rec = w_rec
         self.cooc_prior = cooc_prior
+        # If feat_stats is supplied (from fit_weights), use the same z-score
+        # normalization at inference. Otherwise default to identity (m=0,s=1).
+        fs = feat_stats or {}
+        self._cat_m, self._cat_s = fs.get("cat", [0.0, 1.0])
+        self._sch_m, self._sch_s = fs.get("sch", [0.0, 1.0])
+        self._ept_m, self._ept_s = fs.get("ept", [0.0, 1.0])
+        self._rec_m, self._rec_s = fs.get("rec", [0.0, 1.0])
+        self._coo_m, self._coo_s = fs.get("cooc", [0.0, 1.0])
         self.temp = temperature
         self.name = f"SessionRerank({base.name})"
 
@@ -215,11 +225,12 @@ class SessionRerank:
         sch = np.array([prior.sch_w.get(c.schema_signature, 0.0) for c in cands])
         ept = np.array([prior.ept_w.get(c.endpoint_pattern, 0.0) for c in cands])
         rec = np.array([prior.rec_w.get(c.category, 0.0) for c in cands])
-        # log-transform the priors so they behave additively in log-odds space
-        cat = np.log1p(cat * 10.0)
-        sch = np.log1p(sch * 10.0)
-        ept = np.log1p(ept * 10.0)
-        rec = np.log1p(rec * 10.0)
+        # Apply the same log1p + z-score transform used during fit_weights so
+        # the learned weights are calibrated to unit-variance features.
+        cat = (np.log1p(cat * 10.0) - self._cat_m) / (self._cat_s + 1e-6)
+        sch = (np.log1p(sch * 10.0) - self._sch_m) / (self._sch_s + 1e-6)
+        ept = (np.log1p(ept * 10.0) - self._ept_m) / (self._ept_s + 1e-6)
+        rec = (np.log1p(rec * 10.0) - self._rec_m) / (self._rec_s + 1e-6)
         out = (self.w_base * base
                + self.w_cat * cat
                + self.w_sch * sch
@@ -229,7 +240,7 @@ class SessionRerank:
             cooc_arr = np.array([
                 self.cooc_prior.score(prior.history_uids, c.uid) for c in cands
             ])
-            cooc_arr = np.log1p(cooc_arr * 10.0)
+            cooc_arr = (np.log1p(cooc_arr * 10.0) - self._coo_m) / (self._coo_s + 1e-6)
             out = out + self.w_cooc * cooc_arr
         return out / self.temp
 
@@ -237,28 +248,58 @@ class SessionRerank:
 # ---------------------------------------------------------------------------
 # Lightweight fit — learn the weights from training trajectories
 # ---------------------------------------------------------------------------
+def _seed_everything(seed: int) -> None:
+    """Deterministic seeding across numpy + torch (cpu & cuda)."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
+
 def fit_weights(base_retriever,
                 training_sessions,           # iterable of Session
                 corpus: Sequence[API],
                 *,
                 max_sessions: int = 8000,
-                negatives_per_pos: int = 24,
-                epochs: int = 4,
-                lr: float = 0.25,
+                negatives_per_pos: int = 32,
+                epochs: int = 6,
+                batch_size: int = 32,
+                lr: float = 0.05,
+                weight_decay: float = 1e-2,
+                grad_clip: float = 1.0,
+                avg_last_k_epochs: int = 2,
                 device: str = "cpu",
                 seed: int = 0,
                 cooc_prior: CooccurrencePrior | None = None) -> dict[str, float]:
     """Train (w_base, w_cat, w_sch, w_ept, w_cooc, w_rec) by logistic regression.
 
+    Stability fixes (v3):
+      * Deterministic torch seeding (cuda + cudnn included).
+      * Mini-batched InfoNCE (default batch=32) → lower gradient variance.
+      * Per-feature z-score standardization (computed from training prior
+        statistics) so each feature has unit scale before being scored —
+        critical because the optimizer was previously seeing wildly different
+        magnitudes for `cooc` (sparse, often 0) vs `cat` (dense, ~0.1).
+      * AdamW with weight_decay anchors log-weights near a sensible prior,
+        breaking the degenerate ridge between correlated features
+        (w_cat ↔ w_rec ↔ w_cooc) that caused per-seed flipping.
+      * Gradient clipping at L2 norm 1.0.
+      * Final weights = mean of last `avg_last_k_epochs` epoch checkpoints,
+        which suppresses end-of-training noise.
+
     For each session with K successful calls, we generate K-1 training examples:
     given history H_k = first k successful calls, the next successful call's API
     is the positive; we sample `negatives_per_pos` random APIs from the corpus
-    as negatives. We use **pre-cached base-retriever scores** so the loop is
-    fast even on CPU.
-
-    If `cooc_prior` is provided, a `w_cooc` weight is also learned.
+    as negatives.
     """
-    rng = np.random.default_rng(seed)
+    _seed_everything(seed)
     uid2idx = {a.uid: i for i, a in enumerate(corpus)}
 
     # Collect training tuples first
@@ -272,17 +313,16 @@ def fit_weights(base_retriever,
         if len(tuples) >= max_sessions:
             break
     if not tuples:
-        # Fallback: return reasonable defaults
         return dict(w_base=1.0, w_cat=0.45, w_sch=0.25, w_ept=0.30,
                     w_cooc=0.0, w_rec=0.0)
 
-    print(f"[fit] training tuples: {len(tuples)} (cooc={'on' if cooc_prior else 'off'})")
+    print(f"[fit] training tuples: {len(tuples)} (cooc={'on' if cooc_prior else 'off'})"
+          f"  bs={batch_size}  lr={lr}  wd={weight_decay}  epochs={epochs}")
 
     # Pre-compute base scores per unique query (avoid repeated encoding).
     uniq_q = list({t[0] for t in tuples})
     q2idx = {q: i for i, q in enumerate(uniq_q)}
-    base_scores = np.stack([base_retriever.score(q, candidates=corpus) for q in uniq_q])  # (Q, |C|)
-    # standardize per query
+    base_scores = np.stack([base_retriever.score(q, candidates=corpus) for q in uniq_q])
     base_scores = (base_scores - base_scores.mean(axis=1, keepdims=True)) / (
         base_scores.std(axis=1, keepdims=True) + 1e-6)
 
@@ -293,75 +333,146 @@ def fit_weights(base_retriever,
     uid_arr = np.array([a.uid for a in corpus])
 
     use_cooc = cooc_prior is not None
-    # Parameters (in log-space to keep them positive)
-    # Order: [base, cat, sch, ept, cooc, rec]
-    init_log = [0.0, np.log(0.45), np.log(0.25), np.log(0.30),
-                np.log(0.30), np.log(0.20)]
-    w = torch.tensor(init_log, dtype=torch.float32, requires_grad=True)
-    opt = torch.optim.Adam([w], lr=lr)
 
+    # ------------------------------------------------------------------
+    # Build per-example feature tensors ONCE (much faster, deterministic).
+    # For each tuple i we cache: prior + history_uids for re-use in batches.
+    # ------------------------------------------------------------------
+    cached_priors: list[SessionPrior] = []
+    cached_hist_uids: list[list[str]] = []
+    for q, hist_uids, _pos in tuples:
+        hist_apis = [corpus[uid2idx[u]] for u in hist_uids]
+        cached_priors.append(SessionPrior.from_apis(hist_apis))
+        cached_hist_uids.append(hist_uids)
+
+    # ------------------------------------------------------------------
+    # Per-feature statistics on a sample of training examples (used to
+    # z-score features so the optimizer sees unit-variance signals).
+    # ------------------------------------------------------------------
     rng = np.random.default_rng(seed)
+    sample_idx = rng.choice(len(tuples), size=min(2048, len(tuples)), replace=False)
+    feat_samples = {"cat": [], "sch": [], "ept": [], "rec": [], "cooc": []}
     N = len(corpus)
+    for idx in sample_idx:
+        prior = cached_priors[idx]
+        hu = cached_hist_uids[idx]
+        # draw 16 random candidates per example to estimate marginal stats
+        cand = rng.integers(0, N, size=16)
+        feat_samples["cat"].extend(prior.cat_w.get(cat_arr[i], 0.0) for i in cand)
+        feat_samples["sch"].extend(prior.sch_w.get(sch_arr[i], 0.0) for i in cand)
+        feat_samples["ept"].extend(prior.ept_w.get(ept_arr[i], 0.0) for i in cand)
+        feat_samples["rec"].extend(prior.rec_w.get(cat_arr[i], 0.0) for i in cand)
+        if use_cooc:
+            feat_samples["cooc"].extend(
+                cooc_prior.score(hu, uid_arr[i]) for i in cand)
+
+    def _norm_stats(vs: list[float]) -> tuple[float, float]:
+        arr = np.log1p(np.asarray(vs, dtype=np.float32) * 10.0)
+        m = float(arr.mean())
+        s = float(arr.std() + 1e-6)
+        return m, s
+
+    cat_m, cat_s = _norm_stats(feat_samples["cat"])
+    sch_m, sch_s = _norm_stats(feat_samples["sch"])
+    ept_m, ept_s = _norm_stats(feat_samples["ept"])
+    rec_m, rec_s = _norm_stats(feat_samples["rec"])
+    coo_m, coo_s = (_norm_stats(feat_samples["cooc"]) if use_cooc else (0.0, 1.0))
+    print(f"[fit] feat stats  cat=({cat_m:.3f},{cat_s:.3f})  "
+          f"sch=({sch_m:.3f},{sch_s:.3f})  ept=({ept_m:.3f},{ept_s:.3f})  "
+          f"rec=({rec_m:.3f},{rec_s:.3f})  cooc=({coo_m:.3f},{coo_s:.3f})")
+
+    def _feat(vs: np.ndarray, m: float, s: float) -> torch.Tensor:
+        return torch.from_numpy(((np.log1p(vs * 10.0) - m) / s)).float()
+
+    # ------------------------------------------------------------------
+    # Initialize log-weights tightly around a uniform prior
+    # Order: [base, cat, sch, ept, cooc, rec]
+    # ------------------------------------------------------------------
+    init_log = np.array([np.log(1.0)] * 6, dtype=np.float32)
+    w = torch.tensor(init_log, dtype=torch.float32, requires_grad=True)
+    # AdamW with weight_decay anchors |log w| -> 0 (i.e. weights -> 1.0)
+    opt = torch.optim.AdamW([w], lr=lr, weight_decay=weight_decay)
+
+    # ------------------------------------------------------------------
+    # Training loop with mini-batches
+    # ------------------------------------------------------------------
+    epoch_w_history: list[np.ndarray] = []
     for epoch in range(epochs):
         total = 0.0
+        n_steps = 0
         rng_perm = rng.permutation(len(tuples))
-        for step, idx in enumerate(rng_perm):
-            q, hist_uids, pos_uid = tuples[idx]
-            qi = q2idx[q]
-            pos_i = uid2idx[pos_uid]
-            neg_i = rng.integers(0, N, size=negatives_per_pos)
-            # ensure positive not in negatives
-            neg_i = np.where(neg_i == pos_i, (neg_i + 1) % N, neg_i)
-            all_i = np.concatenate([[pos_i], neg_i])
-            # base
-            b = torch.from_numpy(base_scores[qi, all_i]).float()
-            # priors from history
-            hist_apis = [corpus[uid2idx[u]] for u in hist_uids]
-            prior = SessionPrior.from_apis(hist_apis)
-            cats = np.array([prior.cat_w.get(cat_arr[i], 0.0) for i in all_i])
-            schs = np.array([prior.sch_w.get(sch_arr[i], 0.0) for i in all_i])
-            epts = np.array([prior.ept_w.get(ept_arr[i], 0.0) for i in all_i])
-            recs = np.array([prior.rec_w.get(cat_arr[i], 0.0) for i in all_i])
-            cats = torch.from_numpy(np.log1p(cats * 10.0)).float()
-            schs = torch.from_numpy(np.log1p(schs * 10.0)).float()
-            epts = torch.from_numpy(np.log1p(epts * 10.0)).float()
-            recs = torch.from_numpy(np.log1p(recs * 10.0)).float()
-            if use_cooc:
-                coocs = np.array([
-                    cooc_prior.score(hist_uids, uid_arr[i]) for i in all_i
-                ])
-                coocs = torch.from_numpy(np.log1p(coocs * 10.0)).float()
+        # Build mini-batches of size `batch_size`
+        for b_start in range(0, len(rng_perm), batch_size):
+            b_idx = rng_perm[b_start:b_start + batch_size]
+            # Build (B, 1+neg) logits matrix
+            B = len(b_idx)
+            K = 1 + negatives_per_pos
+            b_tensor = torch.zeros((B, K), dtype=torch.float32)
+            f_cat = torch.zeros((B, K), dtype=torch.float32)
+            f_sch = torch.zeros((B, K), dtype=torch.float32)
+            f_ept = torch.zeros((B, K), dtype=torch.float32)
+            f_rec = torch.zeros((B, K), dtype=torch.float32)
+            f_coo = torch.zeros((B, K), dtype=torch.float32) if use_cooc else None
+            for j, idx in enumerate(b_idx):
+                q, hist_uids, pos_uid = tuples[idx]
+                qi = q2idx[q]
+                pos_i = uid2idx[pos_uid]
+                neg_i = rng.integers(0, N, size=negatives_per_pos)
+                neg_i = np.where(neg_i == pos_i, (neg_i + 1) % N, neg_i)
+                all_i = np.concatenate([[pos_i], neg_i])
+                b_tensor[j] = torch.from_numpy(base_scores[qi, all_i]).float()
+                prior = cached_priors[idx]
+                vc = np.array([prior.cat_w.get(cat_arr[i], 0.0) for i in all_i])
+                vs = np.array([prior.sch_w.get(sch_arr[i], 0.0) for i in all_i])
+                ve = np.array([prior.ept_w.get(ept_arr[i], 0.0) for i in all_i])
+                vr = np.array([prior.rec_w.get(cat_arr[i], 0.0) for i in all_i])
+                f_cat[j] = _feat(vc, cat_m, cat_s)
+                f_sch[j] = _feat(vs, sch_m, sch_s)
+                f_ept[j] = _feat(ve, ept_m, ept_s)
+                f_rec[j] = _feat(vr, rec_m, rec_s)
+                if use_cooc:
+                    vco = np.array([cooc_prior.score(hist_uids, uid_arr[i]) for i in all_i])
+                    f_coo[j] = _feat(vco, coo_m, coo_s)
             wb = torch.exp(w[0]); wc = torch.exp(w[1])
             ws_ = torch.exp(w[2]); we = torch.exp(w[3])
             wco = torch.exp(w[4]); wr = torch.exp(w[5])
-            logits = wb * b + wc * cats + ws_ * schs + we * epts + wr * recs
+            logits = (wb * b_tensor + wc * f_cat + ws_ * f_sch
+                      + we * f_ept + wr * f_rec)
             if use_cooc:
-                logits = logits + wco * coocs
-            # InfoNCE
-            target = torch.zeros((), dtype=torch.long)  # positive is at index 0
-            loss = F.cross_entropy(logits.unsqueeze(0), target.unsqueeze(0))
+                logits = logits + wco * f_coo
+            target = torch.zeros(B, dtype=torch.long)
+            loss = F.cross_entropy(logits, target)
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_([w], max_norm=grad_clip)
             opt.step()
-            total += float(loss.item())
+            total += float(loss.item()) * B
+            n_steps += B
         with torch.no_grad():
             wb_, wc_, ws_v, we_, wco_, wr_ = (float(torch.exp(w[i]).detach()) for i in range(6))
-        print(f"[fit] epoch {epoch+1}/{epochs}  loss={total/len(tuples):.4f}  "
+            epoch_w_history.append(torch.exp(w).detach().cpu().numpy().copy())
+        print(f"[fit] epoch {epoch+1}/{epochs}  loss={total/max(1,n_steps):.4f}  "
               f"w_base={wb_:.3f}  w_cat={wc_:.3f}  "
               f"w_sch={ws_v:.3f}  w_ept={we_:.3f}  "
               f"w_cooc={wco_:.3f}  w_rec={wr_:.3f}")
 
-    with torch.no_grad():
-        wexp = torch.exp(w).detach()
+    # Final weights = mean of last K epoch snapshots (suppresses tail noise)
+    k = min(avg_last_k_epochs, len(epoch_w_history))
+    final = np.mean(np.stack(epoch_w_history[-k:], axis=0), axis=0)
     out = dict(
-        w_base=float(wexp[0]),
-        w_cat=float(wexp[1]),
-        w_sch=float(wexp[2]),
-        w_ept=float(wexp[3]),
-        w_rec=float(wexp[5]),
+        w_base=float(final[0]),
+        w_cat=float(final[1]),
+        w_sch=float(final[2]),
+        w_ept=float(final[3]),
+        w_rec=float(final[5]),
     )
-    if use_cooc:
-        out["w_cooc"] = float(wexp[4])
-    else:
-        out["w_cooc"] = 0.0
+    out["w_cooc"] = float(final[4]) if use_cooc else 0.0
+    # Stash normalization stats so SessionRerank can apply the same transform
+    # at inference time. (Optional; SessionRerank doesn't yet read these but
+    # they are returned for downstream use.)
+    out["_feat_stats"] = {
+        "cat": [cat_m, cat_s], "sch": [sch_m, sch_s],
+        "ept": [ept_m, ept_s], "rec": [rec_m, rec_s],
+        "cooc": [coo_m, coo_s],
+    }
     return out

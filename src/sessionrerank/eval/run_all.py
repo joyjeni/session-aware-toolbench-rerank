@@ -61,13 +61,13 @@ def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
         training_sessions=sessions_iter,
         corpus=corpus,
         max_sessions=args.fit_sessions,
-        epochs=3,
-        lr=0.2,
         seed=seed,
         cooc_prior=cooc_prior,
     )
+    feat_stats = weights.pop("_feat_stats", None)
     print(f"[seed={seed}] learned:", weights)
-    srr = SessionRerank(dense, **weights, cooc_prior=cooc_prior)
+    srr = SessionRerank(dense, **weights, cooc_prior=cooc_prior,
+                        feat_stats=feat_stats)
 
     methods = [bm25, dense, trr]
     if cross_enc is not None:
@@ -286,12 +286,17 @@ def main():
                     for m in ("NDCG@5", "Hit@5", "NDCG@10", "Hit@10")
                 }
         results["significance__SessionRerank_vs_Dense"] = sig
+        # Strip internal feat-stats payload if it sneaks in (it won't anymore
+        # because we pop it above, but be defensive for older snapshots).
+        existing_w = results.get("config", {}).get("weights")
+        if isinstance(existing_w, dict):
+            existing_w = {k: v for k, v in existing_w.items() if not k.startswith("_")}
         results["config"] = {
             "encoder": args.encoder,
             "device": args.device,
             "corpus_size": len(corpus),
             "seeds": seeds,
-            "weights": results.get("config", {}).get("weights"),
+            "weights": existing_w,
             "ks": list(KS),
             "cooc_enabled": bool(args.cooc),
             "cooc_window": args.cooc_window if args.cooc else None,
@@ -313,7 +318,9 @@ def main():
                 "cooc_window": args.cooc_window if args.cooc else None,
                 "cross_encoder": args.cross_encoder_model if args.cross_encoder else None,
                 "weights_per_seed": [
-                    {"seed": s, "weights": r["config"]["weights"]}
+                    {"seed": s,
+                     "weights": {k: v for k, v in r["config"]["weights"].items()
+                                 if not k.startswith("_")}}
                     for s, r in zip(seeds, per_seed_results)
                 ],
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
