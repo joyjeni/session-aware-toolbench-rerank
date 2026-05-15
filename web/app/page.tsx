@@ -81,6 +81,23 @@ function num(x: number, digits = 3) {
   return x.toFixed(digits);
 }
 
+// Extract a numeric value from either a raw number or a {mean,std,values} cell
+// produced by the multi-seed aggregation in eval/run_all.py.
+function valOf(cell: any): number | null {
+  if (cell == null) return null;
+  if (typeof cell === "number") return cell;
+  if (typeof cell === "object" && typeof cell.mean === "number") return cell.mean;
+  return null;
+}
+function stdOf(cell: any): number | null {
+  if (cell && typeof cell === "object" && typeof cell.std === "number") return cell.std;
+  return null;
+}
+function nSeeds(cell: any): number | null {
+  if (cell && typeof cell === "object" && Array.isArray(cell.values)) return cell.values.length;
+  return null;
+}
+
 export default function Page() {
   const [sample, setSample] = useState<ApiItem[]>([]);
   const [corpusSize, setCorpusSize] = useState<number>(0);
@@ -146,6 +163,50 @@ export default function Page() {
     () => FIGURES_BASE.filter((f) => figuresAvailable.includes(f.file)),
     [figuresAvailable]
   );
+
+  // Detect a CrossEncoder method name in the loaded metrics so we can
+  // show it as an extra column when present (Stage 1 additions).
+  const crossEncoderMethod = useMemo(() => {
+    if (!metrics?.splits) return null;
+    for (const split of SPLITS) {
+      const row = metrics.splits?.[split]?.regimes?.session;
+      if (!row) continue;
+      const key = Object.keys(row).find((k) => k.startsWith("CrossEncoder"));
+      if (key) return key;
+    }
+    return null;
+  }, [metrics]);
+
+  const tableMethods = useMemo(() => {
+    if (!crossEncoderMethod) return METHODS;
+    // Insert CE column between ToolRerank and SessionRerank
+    const idx = METHODS.indexOf("ToolRerank");
+    const out = [...METHODS];
+    out.splice(idx + 1, 0, crossEncoderMethod);
+    return out;
+  }, [crossEncoderMethod]);
+
+  const methodShort = useMemo<Record<string, string>>(() => {
+    const m = { ...METHOD_SHORT } as Record<string, string>;
+    if (crossEncoderMethod) m[crossEncoderMethod] = "CrossEncoder";
+    return m;
+  }, [crossEncoderMethod]);
+
+  // Detect # of seeds for the variance caption
+  const seedsRun = useMemo(() => {
+    const cfgSeeds = (metrics as any)?.config?.seeds;
+    if (Array.isArray(cfgSeeds) && cfgSeeds.length) return cfgSeeds as number[];
+    // Fallback: probe a cell for `values`
+    for (const split of SPLITS) {
+      const r = metrics?.splits?.[split]?.regimes?.session;
+      if (!r) continue;
+      for (const k of Object.keys(r)) {
+        const n = nSeeds((r as any)[k]?.["NDCG@5"]);
+        if (n) return Array.from({ length: n }, (_, i) => i);
+      }
+    }
+    return null;
+  }, [metrics]);
 
   const filteredSample = useMemo(() => {
     const f = filter.toLowerCase().trim();
@@ -308,14 +369,21 @@ export default function Page() {
         <p className="body">
           Full evaluation on the official ToolBench benchmark splits. Best per
           row in <strong className="winner">bold green</strong>.
+          {seedsRun && seedsRun.length > 1 && (
+            <>
+              {" "}Numbers are mean across <strong>{seedsRun.length} seeds</strong>{" "}
+              (seeds <code>{seedsRun.join(", ")}</code>); the ± value is the
+              standard deviation across seeds.
+            </>
+          )}
         </p>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Split</th>
-                {METHODS.map((m) => (
-                  <th key={m}>{METHOD_SHORT[m]}</th>
+                {tableMethods.map((m) => (
+                  <th key={m}>{methodShort[m] || m}</th>
                 ))}
                 <th>Δ vs Dense</th>
               </tr>
@@ -327,27 +395,35 @@ export default function Page() {
                   return (
                     <tr key={split}>
                       <td>{split}</td>
-                      {METHODS.map((m) => (
+                      {tableMethods.map((m) => (
                         <td key={m}>—</td>
                       ))}
                       <td>—</td>
                     </tr>
                   );
                 }
-                const vals = METHODS.map((m) => row[m]?.["NDCG@5"]);
-                const best = Math.max(...vals.filter((v) => typeof v === "number"));
-                const dense = row["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"];
-                const ours = row["SessionRerank (ours)"]?.["NDCG@5"];
-                const delta = dense ? ((ours - dense) / dense) * 100 : 0;
+                const vals = tableMethods.map((m) => valOf(row[m]?.["NDCG@5"]));
+                const stds = tableMethods.map((m) => stdOf(row[m]?.["NDCG@5"]));
+                const nums = vals.filter((v): v is number => typeof v === "number");
+                const best = nums.length ? Math.max(...nums) : -Infinity;
+                const dense = valOf(row["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
+                const ours = valOf(row["SessionRerank (ours)"]?.["NDCG@5"]);
+                const delta = dense && ours != null ? ((ours - dense) / dense) * 100 : 0;
                 return (
                   <tr key={split}>
                     <td className="mono">{split}</td>
-                    {METHODS.map((m, i) => {
+                    {tableMethods.map((m, i) => {
                       const v = vals[i];
+                      const sd = stds[i];
                       const isBest = typeof v === "number" && Math.abs(v - best) < 1e-9;
                       return (
                         <td key={m} className={isBest ? "winner" : ""}>
-                          {num(v)}
+                          {v == null ? "—" : num(v)}
+                          {sd != null && sd > 0 && (
+                            <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>
+                              ±{sd.toFixed(3)}
+                            </span>
+                          )}
                         </td>
                       );
                     })}
@@ -362,18 +438,34 @@ export default function Page() {
               {metrics && (
                 <tr className="mean-row">
                   <td className="mono"><strong>Mean</strong></td>
-                  {METHODS.map((m) => {
+                  {tableMethods.map((m) => {
                     const vs = SPLITS.map(
-                      (s) => metrics.splits?.[s]?.regimes?.session?.[m]?.["NDCG@5"]
-                    ).filter((v) => typeof v === "number");
-                    const mean = vs.reduce((a, b) => a + b, 0) / Math.max(1, vs.length);
+                      (s) => valOf(metrics.splits?.[s]?.regimes?.session?.[m]?.["NDCG@5"])
+                    ).filter((v): v is number => typeof v === "number");
+                    const mean = vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
                     return (
                       <td key={m}>
-                        <strong>{num(mean)}</strong>
+                        <strong>{mean == null ? "—" : num(mean)}</strong>
                       </td>
                     );
                   })}
-                  <td className="delta-strong"><strong>+14.7%</strong></td>
+                  <td className="delta-strong">
+                    <strong>
+                      {(() => {
+                        const dvs = SPLITS.map((s) => {
+                          const r = metrics.splits?.[s]?.regimes?.session;
+                          if (!r) return null;
+                          const d = valOf(r["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
+                          const o = valOf(r["SessionRerank (ours)"]?.["NDCG@5"]);
+                          if (d == null || o == null || !d) return null;
+                          return ((o - d) / d) * 100;
+                        }).filter((v): v is number => typeof v === "number");
+                        if (!dvs.length) return "+14.7%";
+                        const m = dvs.reduce((a, b) => a + b, 0) / dvs.length;
+                        return `${m >= 0 ? "+" : ""}${m.toFixed(1)}%`;
+                      })()}
+                    </strong>
+                  </td>
                 </tr>
               )}
             </tbody>
@@ -387,9 +479,13 @@ export default function Page() {
           <h2>Stage-by-Stage Benchmark</h2>
           <p className="body">
             NDCG@5 in the session regime for each stage of the pipeline.
-            Stage 1 establishes classical baselines. Stage 2 adds zero-shot
-            Gemma 4 e2B (bi-encoder and prompted cross-encoder). Stage 4
-            adds the LoRA fine-tuned <code>SessionRerank-Gemma</code>.
+            Stage 1 establishes classical baselines — now extended with a
+            <code> cross-encoder/ms-marco-MiniLM-L-6-v2</code> reranker, a
+            learned tool co-occurrence prior P(api<sub>b</sub>|api<sub>a</sub>),
+            and multi-seed runs (seeds 0,1,2,42,123) so every number carries an
+            explicit standard-deviation band. Stage 2 adds zero-shot Gemma 4 e2B
+            (bi-encoder and prompted cross-encoder). Stage 4 adds the LoRA
+            fine-tuned <code>SessionRerank-Gemma</code>.
           </p>
           <div className="table-wrap">
             <table>
@@ -406,29 +502,37 @@ export default function Page() {
                   const cells = Object.keys(stages).map((label) => {
                     const m = stages[label];
                     const row = m?.splits?.[split]?.regimes?.session;
-                    if (!row) return { label, value: null as number | null, method: "" };
+                    if (!row) return { label, value: null as number | null, std: null as number | null, method: "" };
                     // Best NDCG@5 in this row
                     let bestM = "";
                     let bestV = -Infinity;
+                    let bestSd: number | null = null;
                     for (const [methodName, mv] of Object.entries(row)) {
-                      const v = (mv as any)?.["NDCG@5"];
+                      const cell = (mv as any)?.["NDCG@5"];
+                      const v = valOf(cell);
                       if (typeof v === "number" && v > bestV) {
                         bestV = v;
                         bestM = methodName;
+                        bestSd = stdOf(cell);
                       }
                     }
-                    return { label, value: bestV, method: bestM };
+                    return { label, value: bestV === -Infinity ? null : bestV, std: bestSd, method: bestM };
                   });
                   return (
                     <tr key={split}>
                       <td className="mono">{split}</td>
                       {cells.map((c, i) => (
                         <td key={i}>
-                          {c.value === null || c.value === -Infinity ? (
+                          {c.value === null ? (
                             "—"
                           ) : (
                             <>
                               <strong>{num(c.value)}</strong>
+                              {c.std != null && c.std > 0 && (
+                                <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>
+                                  ±{c.std.toFixed(3)}
+                                </span>
+                              )}
                               <div style={{ fontSize: 11, opacity: 0.65 }}>{c.method}</div>
                             </>
                           )}
@@ -445,10 +549,10 @@ export default function Page() {
                       const row = m?.splits?.[split]?.regimes?.session;
                       if (!row) return null;
                       const vs = Object.values(row)
-                        .map((mv: any) => mv?.["NDCG@5"])
-                        .filter((v) => typeof v === "number") as number[];
+                        .map((mv: any) => valOf(mv?.["NDCG@5"]))
+                        .filter((v): v is number => typeof v === "number");
                       return vs.length ? Math.max(...vs) : null;
-                    }).filter((v) => v !== null) as number[];
+                    }).filter((v): v is number => typeof v === "number");
                     const mean = splitMeans.length
                       ? splitMeans.reduce((a, b) => a + b, 0) / splitMeans.length
                       : null;

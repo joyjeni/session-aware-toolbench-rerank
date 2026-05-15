@@ -1,11 +1,15 @@
-"""Full benchmark: BM25 / Dense / ToolRerank / SessionRerank
+"""Full benchmark: BM25 / Dense / ToolRerank / CrossEncoder / SessionRerank
 on G1/G2/G3 closed + open + session regimes.
+
+Now supports multi-seed runs for variance estimation and a co-occurrence
+prior + cross-encoder baseline as part of the Stage 1 method list.
 
 Writes results to results/metrics.json (machine-readable) and prints a table.
 """
 from __future__ import annotations
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -17,12 +21,133 @@ from ..data.loader import (
 from ..baselines.bm25 import BM25Retriever
 from ..baselines.dense import DenseRetriever
 from ..baselines.toolrerank import ToolRerank
-from ..model.session_rerank import SessionRerank, fit_weights
+from ..model.session_rerank import SessionRerank, fit_weights, CooccurrencePrior
 from .runner import eval_closed, eval_open, eval_session, paired_significance, KS
 
 ROOT = Path(__file__).resolve().parents[3]
 RESULTS = ROOT / "results"
 RESULTS.mkdir(exist_ok=True)
+
+
+def _set_global_seed(seed: int):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch as _t
+        _t.manual_seed(seed)
+        if _t.cuda.is_available():
+            _t.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+
+
+def _strip_per_query(o):
+    if isinstance(o, dict):
+        return {k: _strip_per_query(v) for k, v in o.items() if k != "_per_query"}
+    return o
+
+
+def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
+                   cooc_prior) -> dict:
+    """Run a single-seed Stage 1: refit SessionRerank weights + eval all methods."""
+    _set_global_seed(seed)
+    print(f"\n[run_all] ====== seed={seed} ======")
+
+    # Refit SessionRerank weights for this seed
+    sessions_iter = iter_train_sessions(max_sessions=20000)
+    weights = fit_weights(
+        base_retriever=dense,
+        training_sessions=sessions_iter,
+        corpus=corpus,
+        max_sessions=args.fit_sessions,
+        epochs=3,
+        lr=0.2,
+        seed=seed,
+        cooc_prior=cooc_prior,
+    )
+    print(f"[seed={seed}] learned:", weights)
+    srr = SessionRerank(dense, **weights, cooc_prior=cooc_prior)
+
+    methods = [bm25, dense, trr]
+    if cross_enc is not None:
+        methods.append(cross_enc)
+    methods.append(srr)
+
+    seed_result = {"config": {"seed": seed, "weights": weights}, "splits": {}}
+    for split_name in BENCHMARK_FILES:
+        print(f"  --- {split_name} ---")
+        qs = load_eval_split(split_name)
+        split_block = {"n_queries": len(qs), "regimes": {}}
+
+        closed = {}
+        for m in methods:
+            t1 = time.time()
+            r = eval_closed(m, qs)
+            print(f"    closed   | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
+                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
+            closed[m.name] = r
+        split_block["regimes"]["closed"] = closed
+
+        if not args.skip_open:
+            open_r = {}
+            for m in methods:
+                t1 = time.time()
+                r = eval_open(m, qs, corpus)
+                print(f"    open     | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
+                      f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
+                open_r[m.name] = r
+            split_block["regimes"]["open"] = open_r
+
+        sess = {}
+        for m in methods:
+            t1 = time.time()
+            r = eval_session(m, qs, corpus,
+                             use_session=isinstance(m, SessionRerank),
+                             regime="open" if not args.skip_open else "closed")
+            print(f"    session  | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
+                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
+            sess[m.name] = r
+        split_block["regimes"]["session"] = sess
+
+        seed_result["splits"][split_name] = split_block
+    return seed_result
+
+
+def _aggregate_seeds(per_seed_results: list[dict]) -> dict:
+    """Aggregate per-seed metric numbers into mean ± std per
+    (split, regime, method, metric)."""
+    agg: dict = {"splits": {}}
+    if not per_seed_results:
+        return agg
+    sample = per_seed_results[0]
+    for split_name, blk in sample["splits"].items():
+        agg["splits"][split_name] = {"n_queries": blk["n_queries"], "regimes": {}}
+        for regime, mblock in blk["regimes"].items():
+            agg["splits"][split_name]["regimes"][regime] = {}
+            for method_name, metrics in mblock.items():
+                agg_metrics: dict = {}
+                for metric_name, _ in metrics.items():
+                    if metric_name == "_per_query":
+                        continue
+                    vals: list[float] = []
+                    for sr in per_seed_results:
+                        try:
+                            v = sr["splits"][split_name]["regimes"][regime][method_name][metric_name]
+                            vals.append(float(v))
+                        except (KeyError, TypeError):
+                            pass
+                    if not vals:
+                        continue
+                    mean = float(np.mean(vals))
+                    std = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+                    agg_metrics[metric_name] = {
+                        "mean": mean,
+                        "std": std,
+                        "values": vals,
+                    }
+                agg["splits"][split_name]["regimes"][regime][method_name] = agg_metrics
+    return agg
 
 
 def main():
@@ -35,44 +160,56 @@ def main():
                     help="# multi-turn training tuples to fit SessionRerank weights.")
     ap.add_argument("--skip-open", action="store_true",
                     help="Skip open-corpus eval (faster).")
-    # ---- Gemma 4 extensions (opt-in; require GPU) ------------------
+    # ---- Multi-seed variance analysis -----------------------------------
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed for reproducible session-weight fitting.")
+    ap.add_argument("--seeds", type=str, default=None,
+                    help="Comma-separated list of seeds (e.g. '0,1,2,42,123'). "
+                         "If provided, supersedes --seed and reports mean±std.")
+    # ---- New Stage 1 contributions (A + B) ------------------------------
+    ap.add_argument("--cooc", action="store_true", default=True,
+                    help="Enable co-occurrence prior P(api_b|api_a) (default on).")
+    ap.add_argument("--no-cooc", dest="cooc", action="store_false",
+                    help="Disable co-occurrence prior.")
+    ap.add_argument("--cooc-sessions", type=int, default=20000,
+                    help="# train sessions to harvest co-occurrence pairs from.")
+    ap.add_argument("--cooc-window", type=int, default=3,
+                    help="Sliding window size when counting successful pairs.")
+    ap.add_argument("--cross-encoder", action="store_true", default=True,
+                    help="Add cross-encoder reranker baseline (default on).")
+    ap.add_argument("--no-cross-encoder", dest="cross_encoder", action="store_false",
+                    help="Skip cross-encoder reranker baseline.")
+    ap.add_argument("--cross-encoder-model",
+                    default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+                    help="HF id for the CrossEncoder rerank model.")
+    ap.add_argument("--cross-encoder-topk", type=int, default=100,
+                    help="Top-K from dense to feed into cross-encoder rerank.")
+    # ---- Gemma 4 extensions (opt-in; require GPU) ----------------------
     ap.add_argument("--gemma-embed", default=None,
-                    help="HF id of a Gemma causal LM to use as a bi-encoder "
-                         "(e.g. 'google/gemma-4-270m'). Adds a row to the table.")
+                    help="HF id of a Gemma causal LM to use as a bi-encoder.")
     ap.add_argument("--gemma-rerank", default=None,
-                    help="HF id of a Gemma instruct LM to use as a prompted "
-                         "reranker (e.g. 'google/gemma-4-270m-it'). "
-                         "Reranks top-100 from dense.")
+                    help="HF id of a Gemma instruct LM as prompted reranker.")
     ap.add_argument("--gemma-finetuned", default=None,
-                    help="Path to merged LoRA-finetuned Gemma model. "
-                         "Used as the bi-encoder for SessionRerank-Gemma.")
+                    help="Path to merged LoRA-finetuned Gemma model.")
     ap.add_argument("--rerank-topk", type=int, default=100,
                     help="Candidate pool size for Gemma cross-encoder rerank.")
     ap.add_argument("--gemma-rerank-device", default=None,
-                    help="Device for Gemma reranker (e.g. 'cuda:1'). "
-                         "Defaults to --device.")
+                    help="Device for Gemma reranker (e.g. 'cuda:1').")
     ap.add_argument("--gemma-4bit", action="store_true",
-                    help="Load Gemma reranker / finetuned base in 4-bit (NF4) "
-                         "to fit on a single 16GB GPU.")
+                    help="Load Gemma reranker / finetuned base in 4-bit (NF4).")
     ap.add_argument("--free-embed-after-encode", action="store_true", default=True,
-                    help="Move Gemma-Embed off GPU after corpus encoding to free memory.")
-    ap.add_argument("--seed", type=int, default=None,
-                    help="Random seed for reproducible session-weight fitting.")
+                    help="Move Gemma-Embed off GPU after corpus encoding.")
     ap.add_argument("--out", default=str(RESULTS / "metrics.json"))
     args = ap.parse_args()
 
-    if args.seed is not None:
-        import random
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        try:
-            import torch as _t
-            _t.manual_seed(args.seed)
-            if _t.cuda.is_available():
-                _t.cuda.manual_seed_all(args.seed)
-        except Exception:
-            pass
-        print(f"[run_all] seed={args.seed}")
+    # Resolve seeds: --seeds supersedes --seed
+    if args.seeds:
+        seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
+    elif args.seed is not None:
+        seeds = [int(args.seed)]
+    else:
+        seeds = [0]
+    print(f"[run_all] seeds={seeds}")
 
     print(f"[run_all] device={args.device}  encoder={args.encoder}")
     corpus = build_corpus()
@@ -88,192 +225,123 @@ def main():
     trr   = ToolRerank(dense, beta=0.6)
     print(f"[run_all] retrievers ready in {time.time()-t0:.1f}s")
 
-    # ---------------------------------------------------------------
-    # Fit SessionRerank weights from training trajectories
-    # ---------------------------------------------------------------
-    print("[run_all] fitting SessionRerank weights …")
-    sessions_iter = iter_train_sessions(max_sessions=20000)
-    weights = fit_weights(
-        base_retriever=dense,
-        training_sessions=sessions_iter,
-        corpus=corpus,
-        max_sessions=args.fit_sessions,
-        epochs=3,
-        lr=0.2,
-    )
-    print("[run_all] learned:", weights)
-    srr = SessionRerank(dense, **weights)
-
-    methods = [bm25, dense, trr, srr]
-
-    # ---------------------------------------------------------------
-    # Optional Gemma 4 methods (require GPU / Colab)
-    # ---------------------------------------------------------------
-    gemma_embed = None
-    gemma_rerank = None
-    sr_gemma = None
-    weights_gemma = None
-    if args.gemma_embed:
-        from ..baselines.gemma_embed import GemmaEmbedder
-        print(f"[run_all] loading Gemma-Embed: {args.gemma_embed}")
-        gemma_embed = GemmaEmbedder(corpus, model_name=args.gemma_embed,
-                                     device=args.device, cache_dir=str(cache_dir))
-        methods.append(gemma_embed)
-        # Free corpus-encoder GPU memory; query encode will lazily reload.
-        if args.free_embed_after_encode:
-            print("[run_all] freeing Gemma-Embed GPU memory after corpus encode")
-            try:
-                gemma_embed.free_gpu()
-            except Exception as e:
-                print(f"[run_all] free_gpu failed: {e}")
-    if args.gemma_rerank:
-        from ..baselines.gemma_rerank import GemmaPromptedReranker
-        rerank_device = args.gemma_rerank_device or args.device
-        print(f"[run_all] loading GemmaRerank on {rerank_device}: {args.gemma_rerank}")
-        import torch as _t
-        if _t.cuda.is_available():
-            _t.cuda.empty_cache()
-        gemma_rerank = GemmaPromptedReranker(
-            model_name=args.gemma_rerank,
-            device=rerank_device,
-            load_in_4bit=args.gemma_4bit,
-            batch_size=4,
+    # Cross-encoder baseline (deterministic across seeds → load once)
+    cross_enc = None
+    if args.cross_encoder:
+        from ..baselines.cross_encoder import CrossEncoderReranker
+        print(f"[run_all] loading CrossEncoder: {args.cross_encoder_model}")
+        cross_enc = CrossEncoderReranker(
+            first_stage=dense,
+            model_name=args.cross_encoder_model,
+            topk=args.cross_encoder_topk,
+            device=args.device,
         )
-        # Wrap as a first-stage cascade: dense top-K -> Gemma rerank
-        class _GemmaCascade:
-            def __init__(self, first, second, topk):
-                self.first = first; self.second = second; self.topk = topk
-                self.name = f"GemmaRerank cascade (top-{topk})"
-            def score(self, query, candidates=None):
-                # Used by closed-eval only; for open/session we rely on the runner
-                # which calls score on a candidate list.
-                return self.first.score(query, candidates)
-            def rerank(self, query, candidates):
-                # Take top-K by dense, then rescored by Gemma cross-encoder.
-                s1 = self.first.score(query, candidates)
-                top_idx = np.argsort(-s1)[: self.topk]
-                top = [candidates[i] for i in top_idx]
-                s2 = self.second.score(query, top)
-                # Final scores: Gemma scores for top-K, -inf for the rest
-                full = np.full(len(candidates), -1e9, dtype=np.float32)
-                for j, i in enumerate(top_idx):
-                    full[i] = s2[j]
-                return full
-        cascade = _GemmaCascade(dense, gemma_rerank, args.rerank_topk)
-        # Patch score() to apply rerank when called with candidate list
-        cascade.score = cascade.rerank
-        methods.append(cascade)
-    if args.gemma_finetuned:
-        from ..baselines.gemma_embed import GemmaEmbedder
-        # Free reranker GPU memory before loading another encoder
-        if gemma_rerank is not None:
-            try:
-                gemma_rerank.model.to("cpu")
-            except Exception:
-                pass
-        import torch as _t
-        if _t.cuda.is_available():
-            _t.cuda.empty_cache()
-        print(f"[run_all] loading SessionRerank-Gemma base: {args.gemma_finetuned}")
-        ft_base = GemmaEmbedder(corpus, model_name=args.gemma_finetuned,
-                                 device=args.device, cache_dir=str(cache_dir))
-        # Refit session weights against the new base
-        print("[run_all] refitting weights on top of fine-tuned Gemma …")
-        weights_g = fit_weights(
-            base_retriever=ft_base,
-            training_sessions=iter_train_sessions(max_sessions=20000),
-            corpus=corpus, max_sessions=args.fit_sessions,
-            epochs=3, lr=0.2,
-        )
-        sr_gemma = SessionRerank(ft_base, **weights_g)
-        sr_gemma.name = "SessionRerank-Gemma (ours)"
-        weights_gemma = weights_g
-        methods.append(sr_gemma)
 
-    results: dict = {
-        "config": {
+    # Co-occurrence prior (deterministic harvest → built once)
+    cooc_prior = None
+    if args.cooc:
+        print(f"[run_all] building co-occurrence prior "
+              f"({args.cooc_sessions} sessions, window={args.cooc_window}) …")
+        t_co = time.time()
+        cooc_prior = CooccurrencePrior.from_sessions(
+            iter_train_sessions(max_sessions=args.cooc_sessions),
+            max_sessions=args.cooc_sessions,
+            window=args.cooc_window,
+        )
+        print(f"[run_all] cooc keys={cooc_prior.n_keys()} "
+              f"sessions_seen={cooc_prior.n_sessions_seen} "
+              f"({time.time()-t_co:.1f}s)")
+
+    # ---------------------------------------------------------------
+    # Run per-seed evaluations
+    # ---------------------------------------------------------------
+    per_seed_results: list[dict] = []
+    for seed in seeds:
+        sr = _eval_one_seed(seed, args, corpus, bm25, dense, trr,
+                            cross_enc, cooc_prior)
+        per_seed_results.append(sr)
+
+    # ---------------------------------------------------------------
+    # Aggregate (mean ± std across seeds) + write output
+    # ---------------------------------------------------------------
+    if len(per_seed_results) == 1:
+        # Single-seed: keep legacy schema for backwards compatibility
+        results = per_seed_results[0]
+        sig: dict = {}
+        for split_name, blk in results["splits"].items():
+            sig[split_name] = {}
+            for regime in ("open", "session"):
+                if regime not in blk["regimes"]:
+                    continue
+                dense_name = next((k for k in blk["regimes"][regime]
+                                   if k.startswith("Dense")), None)
+                sr_name = next((k for k in blk["regimes"][regime]
+                                if k.startswith("SessionRerank")), None)
+                if not dense_name or not sr_name:
+                    continue
+                per_a = blk["regimes"][regime][dense_name]["_per_query"]
+                per_b = blk["regimes"][regime][sr_name]["_per_query"]
+                sig[split_name][regime] = {
+                    m: paired_significance(per_a, per_b, m)
+                    for m in ("NDCG@5", "Hit@5", "NDCG@10", "Hit@10")
+                }
+        results["significance__SessionRerank_vs_Dense"] = sig
+        results["config"] = {
             "encoder": args.encoder,
             "device": args.device,
             "corpus_size": len(corpus),
-            "weights": weights,
+            "seeds": seeds,
+            "weights": results.get("config", {}).get("weights"),
             "ks": list(KS),
-            "gemma_embed": args.gemma_embed,
-            "gemma_rerank": args.gemma_rerank,
-            "gemma_finetuned": args.gemma_finetuned,
-            "weights_gemma": weights_gemma,
+            "cooc_enabled": bool(args.cooc),
+            "cooc_window": args.cooc_window if args.cooc else None,
+            "cross_encoder": args.cross_encoder_model if args.cross_encoder else None,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        },
-        "splits": {},
-    }
+        }
+        out = _strip_per_query(results)
+    else:
+        # Multi-seed: emit mean±std aggregate; keep per-seed weights for audit
+        aggregate = _aggregate_seeds(per_seed_results)
+        out = {
+            "config": {
+                "encoder": args.encoder,
+                "device": args.device,
+                "corpus_size": len(corpus),
+                "seeds": seeds,
+                "ks": list(KS),
+                "cooc_enabled": bool(args.cooc),
+                "cooc_window": args.cooc_window if args.cooc else None,
+                "cross_encoder": args.cross_encoder_model if args.cross_encoder else None,
+                "weights_per_seed": [
+                    {"seed": s, "weights": r["config"]["weights"]}
+                    for s, r in zip(seeds, per_seed_results)
+                ],
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+            "splits": aggregate["splits"],
+        }
+        # Paired significance — run on the first seed only (representative)
+        sig: dict = {}
+        first = per_seed_results[0]
+        for split_name, blk in first["splits"].items():
+            sig[split_name] = {}
+            for regime in ("open", "session"):
+                if regime not in blk["regimes"]:
+                    continue
+                dense_name = next((k for k in blk["regimes"][regime]
+                                   if k.startswith("Dense")), None)
+                sr_name = next((k for k in blk["regimes"][regime]
+                                if k.startswith("SessionRerank")), None)
+                if not dense_name or not sr_name:
+                    continue
+                per_a = blk["regimes"][regime][dense_name]["_per_query"]
+                per_b = blk["regimes"][regime][sr_name]["_per_query"]
+                sig[split_name][regime] = {
+                    m: paired_significance(per_a, per_b, m)
+                    for m in ("NDCG@5", "Hit@5", "NDCG@10", "Hit@10")
+                }
+        out["significance__SessionRerank_vs_Dense__seed0"] = sig
 
-    for split_name in BENCHMARK_FILES:
-        print(f"\n=== {split_name} ===")
-        qs = load_eval_split(split_name)
-        split_block = {"n_queries": len(qs), "regimes": {}}
-
-        # Closed
-        closed = {}
-        for m in methods:
-            t1 = time.time()
-            r = eval_closed(m, qs)
-            print(f"  closed   | {m.name:30s} | NDCG@5={r['NDCG@5']:.3f}  "
-                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-            closed[m.name] = r
-        split_block["regimes"]["closed"] = closed
-
-        # Open
-        if not args.skip_open:
-            open_r = {}
-            for m in methods:
-                t1 = time.time()
-                r = eval_open(m, qs, corpus)
-                print(f"  open     | {m.name:30s} | NDCG@5={r['NDCG@5']:.3f}  "
-                      f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-                open_r[m.name] = r
-            split_block["regimes"]["open"] = open_r
-
-        # Session-aware (multi-turn, on open corpus)
-        sess = {}
-        for m in methods:
-            t1 = time.time()
-            r = eval_session(m, qs, corpus, use_session=isinstance(m, SessionRerank),
-                             regime="open" if not args.skip_open else "closed")
-            print(f"  session  | {m.name:30s} | NDCG@5={r['NDCG@5']:.3f}  "
-                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-            sess[m.name] = r
-        split_block["regimes"]["session"] = sess
-
-        results["splits"][split_name] = split_block
-
-    # ---------------------------------------------------------------
-    # Statistical significance: SessionRerank vs Dense (open + session)
-    # ---------------------------------------------------------------
-    sig = {}
-    for split_name, blk in results["splits"].items():
-        sig[split_name] = {}
-        for regime in ("open", "session"):
-            if regime not in blk["regimes"]:
-                continue
-            a = blk["regimes"][regime].get("Dense")
-            # find Dense name dynamically
-            dense_name = next((k for k in blk["regimes"][regime] if k.startswith("Dense")), None)
-            sr_name = next((k for k in blk["regimes"][regime] if k.startswith("SessionRerank")), None)
-            if not dense_name or not sr_name:
-                continue
-            per_a = blk["regimes"][regime][dense_name]["_per_query"]
-            per_b = blk["regimes"][regime][sr_name]["_per_query"]
-            sig[split_name][regime] = {
-                m: paired_significance(per_a, per_b, m)
-                for m in ("NDCG@5", "Hit@5", "NDCG@10", "Hit@10")
-            }
-    results["significance__SessionRerank_vs_Dense"] = sig
-
-    # strip per-query before dump
-    def _strip(o):
-        if isinstance(o, dict):
-            return {k: _strip(v) for k, v in o.items() if k != "_per_query"}
-        return o
-    out = _strip(results)
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\n[run_all] wrote {args.out}")
     print(f"[run_all] total time: {time.time()-t0:.1f}s")
