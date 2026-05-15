@@ -110,7 +110,7 @@ class GemmaPromptedReranker:
     def score(self, query: str, candidates: Sequence[API]) -> np.ndarray:
         prompts = [
             PROMPT_TEMPLATE.format(
-                query=query, tool=c.tool, api=c.api,
+                query=query, tool=c.tool_name, api=c.api_name,
                 desc=(c.description or "")[:600],
             )
             for c in candidates

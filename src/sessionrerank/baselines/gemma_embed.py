@@ -37,7 +37,7 @@ import tempfile
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
 
@@ -153,9 +153,20 @@ class GemmaEmbedder:
         self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModel.from_pretrained(
-            patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
-        ).to(device)
+        # Gemma 4 e2B is multimodal: AutoModel returns the joint encoder and
+        # complains about MISSING/UNEXPECTED PLE + vision/audio tower keys.
+        # AutoModelForCausalLM loads the full causal LM cleanly; .model is the
+        # text-only inner Gemma4TextModel we actually want for mean pooling.
+        try:
+            causal = AutoModelForCausalLM.from_pretrained(
+                patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+            )
+            self.model = getattr(causal, "model", causal).to(device)
+        except Exception as e:
+            print(f"[Gemma-Embed] AutoModelForCausalLM failed ({e}); falling back to AutoModel")
+            self.model = AutoModel.from_pretrained(
+                patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+            ).to(device)
         self.model.eval()
 
         self.corpus = list(corpus)

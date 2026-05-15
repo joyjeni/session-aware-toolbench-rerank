@@ -74,21 +74,25 @@ def build_dataset(
     n_negatives: int = 7,
     seed: int = 0,
 ) -> List[TrainExample]:
-    """Mine training triples from ToolBench G2/G3 multi-turn sessions."""
+    """Mine training triples from ToolBench multi-turn sessions.
+
+    `data_root` is accepted for CLI compatibility but the loader resolves the
+    path from its module-level ROOT constant.
+    """
+    del data_root  # loader uses module-level ROOT; arg kept for CLI parity
     random.seed(seed)
-    corpus = build_corpus(data_root)
+    corpus = build_corpus()
     by_uid = {a.uid: a for a in corpus}
-    by_cat = {}
+    by_cat: dict[str, list] = {}
     for a in corpus:
         by_cat.setdefault(a.category, []).append(a)
 
     examples: List[TrainExample] = []
-    for sess in iter_train_sessions(data_root, splits=("G2", "G3")):
+    for sess in iter_train_sessions():
+        # successful_uids is a flat per-session list of gold uids in call order
         history_uids: List[str] = []
-        for turn in sess.turns:
-            if not turn.gold_apis:
-                continue
-            gold = by_uid.get(turn.gold_apis[0])
+        for gold_uid in sess.successful_uids:
+            gold = by_uid.get(gold_uid)
             if gold is None:
                 continue
 
@@ -100,18 +104,22 @@ def build_dataset(
 
             cand_list = [gold] + negs
             random.shuffle(cand_list)
-            cand_str = "\n".join(f"- {c.tool} / {c.api}: {(c.description or '')[:140]}" for c in cand_list)
+            cand_str = "\n".join(
+                f"- {c.tool_name} / {c.api_name}: {(c.description or '')[:140]}"
+                for c in cand_list
+            )
 
             hist_str = ", ".join(
-                f"{by_uid[u].tool}/{by_uid[u].api}" for u in history_uids[-5:]
+                f"{by_uid[u].tool_name}/{by_uid[u].api_name}"
+                for u in history_uids[-5:]
                 if u in by_uid
             )
 
             examples.append(TrainExample(
                 history=hist_str,
-                query=turn.query,
+                query=sess.initial_query,
                 candidates=cand_str,
-                answer=f"{gold.tool} / {gold.api}",
+                answer=f"{gold.tool_name} / {gold.api_name}",
             ))
             history_uids.append(gold.uid)
             if len(examples) >= n_examples:
