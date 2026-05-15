@@ -68,27 +68,44 @@ def _maybe_patch_tokenizer_config(model_path: str) -> str:
         cache_root = os.path.join(tempfile.gettempdir(), "gemma_patched")
     name = os.path.basename(model_path.rstrip("/")) or "model"
     patched_dir = os.path.join(cache_root, name)
-    if not os.path.isfile(os.path.join(patched_dir, "tokenizer_config.json")):
+    patched_cfg = os.path.join(patched_dir, "tokenizer_config.json")
+    # Use exists+is-real-file to decide; symlinks to read-only file fail os.path.isfile differently
+    already_patched = os.path.isfile(patched_cfg) and not os.path.islink(patched_cfg)
+    if not already_patched:
         os.makedirs(patched_dir, exist_ok=True)
-        # symlink large weight files to avoid duplicating ~5 GB
+        # symlink everything; we'll delete the tokenizer_config.json symlink and write real file
         for entry in os.listdir(model_path):
             src = os.path.join(model_path, entry)
             dst = os.path.join(patched_dir, entry)
-            if os.path.exists(dst):
-                continue
+            if os.path.islink(dst) or os.path.exists(dst):
+                # Remove existing symlink/file so we can replace it (especially tokenizer_config.json)
+                try:
+                    if os.path.islink(dst) or os.path.isfile(dst):
+                        os.unlink(dst)
+                    elif os.path.isdir(dst):
+                        shutil.rmtree(dst)
+                except Exception:
+                    pass
             try:
                 if os.path.isdir(src):
-                    shutil.copytree(src, dst, symlinks=True)
+                    # Symlink the whole subdir (saves disk; nested files still resolve)
+                    os.symlink(src, dst)
                 else:
                     os.symlink(src, dst)
             except Exception:
                 try:
-                    shutil.copy2(src, dst)
+                    shutil.copy2(src, dst) if os.path.isfile(src) else shutil.copytree(src, dst)
                 except Exception:
                     pass
-        # rewrite the offending file
+        # Now overwrite the tokenizer_config.json with patched dict-format content.
+        # First make sure it's not still a symlink to the read-only source.
+        if os.path.islink(patched_cfg):
+            try:
+                os.unlink(patched_cfg)
+            except Exception:
+                pass
         cfg["extra_special_tokens"] = {}
-        with open(os.path.join(patched_dir, "tokenizer_config.json"), "w") as f:
+        with open(patched_cfg, "w") as f:
             json.dump(cfg, f)
         print(f"[gemma] patched tokenizer_config.json -> {patched_dir}")
     return patched_dir

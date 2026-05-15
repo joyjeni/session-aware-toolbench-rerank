@@ -56,8 +56,23 @@ def main():
                          "to fit on a single 16GB GPU.")
     ap.add_argument("--free-embed-after-encode", action="store_true", default=True,
                     help="Move Gemma-Embed off GPU after corpus encoding to free memory.")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed for reproducible session-weight fitting.")
     ap.add_argument("--out", default=str(RESULTS / "metrics.json"))
     args = ap.parse_args()
+
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        try:
+            import torch as _t
+            _t.manual_seed(args.seed)
+            if _t.cuda.is_available():
+                _t.cuda.manual_seed_all(args.seed)
+        except Exception:
+            pass
+        print(f"[run_all] seed={args.seed}")
 
     print(f"[run_all] device={args.device}  encoder={args.encoder}")
     corpus = build_corpus()

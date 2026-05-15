@@ -93,6 +93,7 @@ export default function Page() {
   const [loading, setLoading] = useState<boolean>(false);
   const [metrics, setMetrics] = useState<any | null>(null);
   const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
+  const [stages, setStages] = useState<Record<string, any>>({});
 
   // Load API sample for the history picker
   useEffect(() => {
@@ -107,6 +108,27 @@ export default function Page() {
       .then((r) => r.json())
       .then(setMetrics)
       .catch(() => {});
+    // Probe per-stage metrics files (added in v1.1 Gemma 4 run)
+    const STAGE_FILES: Record<string, string> = {
+      "Stage 1 — Classical": "/metrics_classical.json",
+      "Stage 2 — + Gemma zero-shot": "/metrics_with_gemma.json",
+      "Stage 4 — + Fine-tuned": "/metrics.json",
+    };
+    Promise.all(
+      Object.entries(STAGE_FILES).map(async ([label, url]) => {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) return [label, null] as const;
+          return [label, await r.json()] as const;
+        } catch {
+          return [label, null] as const;
+        }
+      })
+    ).then((entries) => {
+      const out: Record<string, any> = {};
+      for (const [label, m] of entries) if (m) out[label] = m;
+      setStages(out);
+    });
     // Probe each figure with HEAD so we only render those that exist
     Promise.all(
       FIGURES_BASE.map(async (f) => {
@@ -358,6 +380,96 @@ export default function Page() {
           </table>
         </div>
       </section>
+
+      {/* Stage Comparison — added for Gemma 4 Hackathon submission */}
+      {Object.keys(stages).length > 0 && (
+        <section className="container section">
+          <h2>Stage-by-Stage Benchmark</h2>
+          <p className="body">
+            NDCG@5 in the session regime for each stage of the pipeline.
+            Stage 1 establishes classical baselines. Stage 2 adds zero-shot
+            Gemma 4 e2B (bi-encoder and prompted cross-encoder). Stage 4
+            adds the LoRA fine-tuned <code>SessionRerank-Gemma</code>.
+          </p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Split</th>
+                  {Object.keys(stages).map((label) => (
+                    <th key={label}>{label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {SPLITS.map((split) => {
+                  const cells = Object.keys(stages).map((label) => {
+                    const m = stages[label];
+                    const row = m?.splits?.[split]?.regimes?.session;
+                    if (!row) return { label, value: null as number | null, method: "" };
+                    // Best NDCG@5 in this row
+                    let bestM = "";
+                    let bestV = -Infinity;
+                    for (const [methodName, mv] of Object.entries(row)) {
+                      const v = (mv as any)?.["NDCG@5"];
+                      if (typeof v === "number" && v > bestV) {
+                        bestV = v;
+                        bestM = methodName;
+                      }
+                    }
+                    return { label, value: bestV, method: bestM };
+                  });
+                  return (
+                    <tr key={split}>
+                      <td className="mono">{split}</td>
+                      {cells.map((c, i) => (
+                        <td key={i}>
+                          {c.value === null || c.value === -Infinity ? (
+                            "—"
+                          ) : (
+                            <>
+                              <strong>{num(c.value)}</strong>
+                              <div style={{ fontSize: 11, opacity: 0.65 }}>{c.method}</div>
+                            </>
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+                <tr className="mean-row">
+                  <td><strong>Mean</strong></td>
+                  {Object.keys(stages).map((label) => {
+                    const m = stages[label];
+                    const splitMeans = SPLITS.map((split) => {
+                      const row = m?.splits?.[split]?.regimes?.session;
+                      if (!row) return null;
+                      const vs = Object.values(row)
+                        .map((mv: any) => mv?.["NDCG@5"])
+                        .filter((v) => typeof v === "number") as number[];
+                      return vs.length ? Math.max(...vs) : null;
+                    }).filter((v) => v !== null) as number[];
+                    const mean = splitMeans.length
+                      ? splitMeans.reduce((a, b) => a + b, 0) / splitMeans.length
+                      : null;
+                    return (
+                      <td key={label}>
+                        <strong>{mean === null ? "—" : num(mean)}</strong>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="body" style={{ marginTop: 12, fontSize: 13, opacity: 0.75 }}>
+            Each cell shows the best NDCG@5 within that stage on the session
+            regime, along with the winning method. Stage 3 (LoRA fine-tune of
+            Gemma 4 e2B with Unsloth) does not produce its own benchmark file;
+            its output feeds into Stage 4.
+          </p>
+        </section>
+      )}
 
       {/* Figures grid */}
       <section className="container section">
