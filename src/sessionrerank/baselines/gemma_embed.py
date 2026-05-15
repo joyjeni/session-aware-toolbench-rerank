@@ -47,11 +47,20 @@ def _maybe_patch_tokenizer_config(model_path: str) -> str:
 
     Gemma 4 ships extra_special_tokens as a v5-style list; v4 transformers
     expects a dict. If we detect that, we copy the model dir to a writable
-    cache and rewrite the tokenizer_config.json. No-op for HF model ids.
+    cache and rewrite the tokenizer_config.json. No-op for HF model ids,
+    and a no-op on transformers >= 5 (which handles the list format natively).
     Returns the (possibly new) model path to use.
     """
     if not os.path.isdir(model_path):
         return model_path
+    # Skip the patch entirely on transformers v5+: it understands the list format.
+    try:
+        import transformers
+        major = int(transformers.__version__.split(".")[0])
+        if major >= 5:
+            return model_path
+    except Exception:
+        pass
     cfg_path = os.path.join(model_path, "tokenizer_config.json")
     if not os.path.isfile(cfg_path):
         return model_path
