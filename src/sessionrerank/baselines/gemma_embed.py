@@ -65,14 +65,14 @@ class GemmaEmbedder:
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 
         dtype = (
-            torch.bfloat16 if torch_dtype == "auto" and device.startswith("cuda")
+            torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModel.from_pretrained(
-            model_name, torch_dtype=dtype, token=hf_token
+            model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
         ).to(device)
         self.model.eval()
 
@@ -94,8 +94,26 @@ class GemmaEmbedder:
                 emb_path.parent.mkdir(parents=True, exist_ok=True)
                 np.save(emb_path, self.corpus_emb)
 
+    def free_gpu(self):
+        """Move model off GPU and clear cache. Query encoding will move it back lazily."""
+        try:
+            self.model.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def _ensure_on_device(self):
+        try:
+            p = next(self.model.parameters())
+            if str(p.device) != self.device:
+                self.model.to(self.device)
+        except StopIteration:
+            pass
+
     @torch.no_grad()
     def _encode(self, texts: Sequence[str]) -> np.ndarray:
+        self._ensure_on_device()
         all_emb = []
         for i in range(0, len(texts), self.batch_size):
             batch = list(texts[i : i + self.batch_size])

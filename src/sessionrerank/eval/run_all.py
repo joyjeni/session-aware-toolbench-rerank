@@ -48,6 +48,14 @@ def main():
                          "Used as the bi-encoder for SessionRerank-Gemma.")
     ap.add_argument("--rerank-topk", type=int, default=100,
                     help="Candidate pool size for Gemma cross-encoder rerank.")
+    ap.add_argument("--gemma-rerank-device", default=None,
+                    help="Device for Gemma reranker (e.g. 'cuda:1'). "
+                         "Defaults to --device.")
+    ap.add_argument("--gemma-4bit", action="store_true",
+                    help="Load Gemma reranker / finetuned base in 4-bit (NF4) "
+                         "to fit on a single 16GB GPU.")
+    ap.add_argument("--free-embed-after-encode", action="store_true", default=True,
+                    help="Move Gemma-Embed off GPU after corpus encoding to free memory.")
     ap.add_argument("--out", default=str(RESULTS / "metrics.json"))
     args = ap.parse_args()
 
@@ -96,11 +104,26 @@ def main():
         gemma_embed = GemmaEmbedder(corpus, model_name=args.gemma_embed,
                                      device=args.device, cache_dir=str(cache_dir))
         methods.append(gemma_embed)
+        # Free corpus-encoder GPU memory; query encode will lazily reload.
+        if args.free_embed_after_encode:
+            print("[run_all] freeing Gemma-Embed GPU memory after corpus encode")
+            try:
+                gemma_embed.free_gpu()
+            except Exception as e:
+                print(f"[run_all] free_gpu failed: {e}")
     if args.gemma_rerank:
         from ..baselines.gemma_rerank import GemmaPromptedReranker
-        print(f"[run_all] loading GemmaRerank: {args.gemma_rerank}")
-        gemma_rerank = GemmaPromptedReranker(model_name=args.gemma_rerank,
-                                              device=args.device)
+        rerank_device = args.gemma_rerank_device or args.device
+        print(f"[run_all] loading GemmaRerank on {rerank_device}: {args.gemma_rerank}")
+        import torch as _t
+        if _t.cuda.is_available():
+            _t.cuda.empty_cache()
+        gemma_rerank = GemmaPromptedReranker(
+            model_name=args.gemma_rerank,
+            device=rerank_device,
+            load_in_4bit=args.gemma_4bit,
+            batch_size=4,
+        )
         # Wrap as a first-stage cascade: dense top-K -> Gemma rerank
         class _GemmaCascade:
             def __init__(self, first, second, topk):
@@ -127,6 +150,15 @@ def main():
         methods.append(cascade)
     if args.gemma_finetuned:
         from ..baselines.gemma_embed import GemmaEmbedder
+        # Free reranker GPU memory before loading another encoder
+        if gemma_rerank is not None:
+            try:
+                gemma_rerank.model.to("cpu")
+            except Exception:
+                pass
+        import torch as _t
+        if _t.cuda.is_available():
+            _t.cuda.empty_cache()
         print(f"[run_all] loading SessionRerank-Gemma base: {args.gemma_finetuned}")
         ft_base = GemmaEmbedder(corpus, model_name=args.gemma_finetuned,
                                  device=args.device, cache_dir=str(cache_dir))

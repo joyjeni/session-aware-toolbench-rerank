@@ -51,6 +51,7 @@ class GemmaPromptedReranker:
         max_length: int = 384,
         batch_size: int = 8,
         torch_dtype: str = "auto",
+        load_in_4bit: bool = False,
     ):
         self.model_name = model_name
         short = model_name.split("/")[-1]
@@ -61,15 +62,37 @@ class GemmaPromptedReranker:
 
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         dtype = (
-            torch.bfloat16 if torch_dtype == "auto" and device.startswith("cuda")
+            torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype, token=hf_token
-        ).to(device)
+
+        # Auto-enable 4-bit on large (>=1B) Gemma to fit on a single T4 (~14.5 GiB).
+        if load_in_4bit or os.environ.get("GEMMA_RERANK_4BIT") == "1":
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name, quantization_config=bnb, token=hf_token,
+                    device_map={"": device} if device.startswith("cuda") else None,
+                    low_cpu_mem_usage=True,
+                )
+            except Exception as e:
+                print(f"[GemmaRerank] 4-bit load failed ({e}); falling back to fp16")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+                ).to(device)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+            ).to(device)
         self.model.eval()
 
         # Pre-compute YES/NO token IDs. We try a few common encodings.
