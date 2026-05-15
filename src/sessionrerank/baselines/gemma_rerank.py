@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
+from .gemma_embed import _maybe_patch_tokenizer_config
 
 
 PROMPT_TEMPLATE = (
@@ -65,9 +66,11 @@ class GemmaPromptedReranker:
             torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+        patched = _maybe_patch_tokenizer_config(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        model_name = patched  # use patched path for AutoModel below
 
         # Auto-enable 4-bit on large (>=1B) Gemma to fit on a single T4 (~14.5 GiB).
         if load_in_4bit or os.environ.get("GEMMA_RERANK_4BIT") == "1":

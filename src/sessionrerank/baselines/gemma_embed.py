@@ -31,12 +31,67 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 import os
+import json
+import shutil
+import tempfile
 import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
 from ..data.loader import API
+
+
+def _maybe_patch_tokenizer_config(model_path: str) -> str:
+    """Patch Gemma 4 tokenizer_config.json so v4 transformers can load it.
+
+    Gemma 4 ships extra_special_tokens as a v5-style list; v4 transformers
+    expects a dict. If we detect that, we copy the model dir to a writable
+    cache and rewrite the tokenizer_config.json. No-op for HF model ids.
+    Returns the (possibly new) model path to use.
+    """
+    if not os.path.isdir(model_path):
+        return model_path
+    cfg_path = os.path.join(model_path, "tokenizer_config.json")
+    if not os.path.isfile(cfg_path):
+        return model_path
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        return model_path
+    if not isinstance(cfg.get("extra_special_tokens"), list):
+        return model_path
+    # Need to patch. Build a writable mirror.
+    cache_root = os.environ.get("GEMMA_PATCH_DIR", "/kaggle/working/gemma_patched")
+    if not os.path.isdir("/kaggle"):
+        cache_root = os.path.join(tempfile.gettempdir(), "gemma_patched")
+    name = os.path.basename(model_path.rstrip("/")) or "model"
+    patched_dir = os.path.join(cache_root, name)
+    if not os.path.isfile(os.path.join(patched_dir, "tokenizer_config.json")):
+        os.makedirs(patched_dir, exist_ok=True)
+        # symlink large weight files to avoid duplicating ~5 GB
+        for entry in os.listdir(model_path):
+            src = os.path.join(model_path, entry)
+            dst = os.path.join(patched_dir, entry)
+            if os.path.exists(dst):
+                continue
+            try:
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, symlinks=True)
+                else:
+                    os.symlink(src, dst)
+            except Exception:
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
+        # rewrite the offending file
+        cfg["extra_special_tokens"] = {}
+        with open(os.path.join(patched_dir, "tokenizer_config.json"), "w") as f:
+            json.dump(cfg, f)
+        print(f"[gemma] patched tokenizer_config.json -> {patched_dir}")
+    return patched_dir
 
 
 class GemmaEmbedder:
@@ -68,11 +123,12 @@ class GemmaEmbedder:
             torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+        patched = _maybe_patch_tokenizer_config(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModel.from_pretrained(
-            model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+            patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
         ).to(device)
         self.model.eval()
 

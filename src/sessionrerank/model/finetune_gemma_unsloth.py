@@ -144,6 +144,10 @@ def train(
 
     ds = Dataset.from_list([{"text": e.render()} for e in examples])
 
+    # Patch Gemma 4 tokenizer_config if it ships the v5-style list format.
+    from ..baselines.gemma_embed import _maybe_patch_tokenizer_config
+    base_model = _maybe_patch_tokenizer_config(base_model)
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=base_model,
         max_seq_length=max_seq_len,
