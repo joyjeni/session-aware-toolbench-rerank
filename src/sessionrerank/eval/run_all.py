@@ -35,6 +35,19 @@ def main():
                     help="# multi-turn training tuples to fit SessionRerank weights.")
     ap.add_argument("--skip-open", action="store_true",
                     help="Skip open-corpus eval (faster).")
+    # ---- Gemma 4 extensions (opt-in; require GPU) ------------------
+    ap.add_argument("--gemma-embed", default=None,
+                    help="HF id of a Gemma causal LM to use as a bi-encoder "
+                         "(e.g. 'google/gemma-4-270m'). Adds a row to the table.")
+    ap.add_argument("--gemma-rerank", default=None,
+                    help="HF id of a Gemma instruct LM to use as a prompted "
+                         "reranker (e.g. 'google/gemma-4-270m-it'). "
+                         "Reranks top-100 from dense.")
+    ap.add_argument("--gemma-finetuned", default=None,
+                    help="Path to merged LoRA-finetuned Gemma model. "
+                         "Used as the bi-encoder for SessionRerank-Gemma.")
+    ap.add_argument("--rerank-topk", type=int, default=100,
+                    help="Candidate pool size for Gemma cross-encoder rerank.")
     ap.add_argument("--out", default=str(RESULTS / "metrics.json"))
     args = ap.parse_args()
 
@@ -70,6 +83,66 @@ def main():
 
     methods = [bm25, dense, trr, srr]
 
+    # ---------------------------------------------------------------
+    # Optional Gemma 4 methods (require GPU / Colab)
+    # ---------------------------------------------------------------
+    gemma_embed = None
+    gemma_rerank = None
+    sr_gemma = None
+    weights_gemma = None
+    if args.gemma_embed:
+        from ..baselines.gemma_embed import GemmaEmbedder
+        print(f"[run_all] loading Gemma-Embed: {args.gemma_embed}")
+        gemma_embed = GemmaEmbedder(corpus, model_name=args.gemma_embed,
+                                     device=args.device, cache_dir=str(cache_dir))
+        methods.append(gemma_embed)
+    if args.gemma_rerank:
+        from ..baselines.gemma_rerank import GemmaPromptedReranker
+        print(f"[run_all] loading GemmaRerank: {args.gemma_rerank}")
+        gemma_rerank = GemmaPromptedReranker(model_name=args.gemma_rerank,
+                                              device=args.device)
+        # Wrap as a first-stage cascade: dense top-K -> Gemma rerank
+        class _GemmaCascade:
+            def __init__(self, first, second, topk):
+                self.first = first; self.second = second; self.topk = topk
+                self.name = f"GemmaRerank cascade (top-{topk})"
+            def score(self, query, candidates=None):
+                # Used by closed-eval only; for open/session we rely on the runner
+                # which calls score on a candidate list.
+                return self.first.score(query, candidates)
+            def rerank(self, query, candidates):
+                # Take top-K by dense, then rescored by Gemma cross-encoder.
+                s1 = self.first.score(query, candidates)
+                top_idx = np.argsort(-s1)[: self.topk]
+                top = [candidates[i] for i in top_idx]
+                s2 = self.second.score(query, top)
+                # Final scores: Gemma scores for top-K, -inf for the rest
+                full = np.full(len(candidates), -1e9, dtype=np.float32)
+                for j, i in enumerate(top_idx):
+                    full[i] = s2[j]
+                return full
+        cascade = _GemmaCascade(dense, gemma_rerank, args.rerank_topk)
+        # Patch score() to apply rerank when called with candidate list
+        cascade.score = cascade.rerank
+        methods.append(cascade)
+    if args.gemma_finetuned:
+        from ..baselines.gemma_embed import GemmaEmbedder
+        print(f"[run_all] loading SessionRerank-Gemma base: {args.gemma_finetuned}")
+        ft_base = GemmaEmbedder(corpus, model_name=args.gemma_finetuned,
+                                 device=args.device, cache_dir=str(cache_dir))
+        # Refit session weights against the new base
+        print("[run_all] refitting weights on top of fine-tuned Gemma …")
+        weights_g = fit_weights(
+            base_retriever=ft_base,
+            training_sessions=iter_train_sessions(max_sessions=20000),
+            corpus=corpus, max_sessions=args.fit_sessions,
+            epochs=3, lr=0.2,
+        )
+        sr_gemma = SessionRerank(ft_base, **weights_g)
+        sr_gemma.name = "SessionRerank-Gemma (ours)"
+        weights_gemma = weights_g
+        methods.append(sr_gemma)
+
     results: dict = {
         "config": {
             "encoder": args.encoder,
@@ -77,6 +150,11 @@ def main():
             "corpus_size": len(corpus),
             "weights": weights,
             "ks": list(KS),
+            "gemma_embed": args.gemma_embed,
+            "gemma_rerank": args.gemma_rerank,
+            "gemma_finetuned": args.gemma_finetuned,
+            "weights_gemma": weights_gemma,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
         "splits": {},
     }

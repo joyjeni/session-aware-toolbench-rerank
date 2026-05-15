@@ -278,6 +278,25 @@ def main():
                     "SessionRerank reduces to Dense when history is empty, "
                     "demonstrating the empty-history safety property.")
 
+    # Figure 7 (optional): Gemma 4 vs MiniLM head-to-head. Only emitted if
+    # the metrics file contains a Gemma method row.
+    has_gemma = any(
+        any("Gemma" in k for k in blk["regimes"].get("session", {}))
+        for blk in m.get("splits", {}).values()
+    )
+    if has_gemma:
+        try:
+            fig_grouped_bar(
+                m, "NDCG@5", "session", "fig7_gemma_vs_minilm", 7,
+                "Gemma 4 variants vs the MiniLM-based SessionRerank on "
+                "ToolBench (session regime). Three Gemma integrations are "
+                "compared: Gemma-Embed (zero-shot bi-encoder), GemmaRerank "
+                "(prompted cross-encoder), and SessionRerank-Gemma (LoRA "
+                "fine-tuned with Unsloth).",
+            )
+        except Exception as e:
+            print(f"[viz] skipped fig7 ({e})")
+
 
 if __name__ == "__main__":
     main()

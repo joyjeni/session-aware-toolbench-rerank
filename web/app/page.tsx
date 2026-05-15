@@ -38,7 +38,7 @@ const METHOD_SHORT: Record<string, string> = {
   "SessionRerank (ours)": "SessionRerank",
 };
 
-const FIGURES = [
+const FIGURES_BASE = [
   {
     file: "fig1_ndcg5_session.png",
     caption:
@@ -69,6 +69,11 @@ const FIGURES = [
     caption:
       "Figure 6. Open-corpus single-turn regime (3,211 APIs, no session history). SessionRerank degrades gracefully to Dense performance — no harm from the added prior when history is empty.",
   },
+  {
+    file: "fig7_gemma_vs_minilm.png",
+    caption:
+      "Figure 7. Gemma 4 vs MiniLM head-to-head — three Gemma variants (Embed, Rerank, fine-tuned) compared against the MiniLM-based SessionRerank on NDCG@5 (session regime).",
+  },
 ];
 
 function num(x: number, digits = 3) {
@@ -87,6 +92,7 @@ export default function Page() {
   const [result, setResult] = useState<RerankResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [metrics, setMetrics] = useState<any | null>(null);
+  const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
 
   // Load API sample for the history picker
   useEffect(() => {
@@ -101,7 +107,23 @@ export default function Page() {
       .then((r) => r.json())
       .then(setMetrics)
       .catch(() => {});
+    // Probe each figure with HEAD so we only render those that exist
+    Promise.all(
+      FIGURES_BASE.map(async (f) => {
+        try {
+          const r = await fetch(`/figures/${f.file}`, { method: "HEAD" });
+          return r.ok ? f.file : null;
+        } catch {
+          return null;
+        }
+      })
+    ).then((files) => setFiguresAvailable(files.filter(Boolean) as string[]));
   }, []);
+
+  const figures = useMemo(
+    () => FIGURES_BASE.filter((f) => figuresAvailable.includes(f.file)),
+    [figuresAvailable]
+  );
 
   const filteredSample = useMemo(() => {
     const f = filter.toLowerCase().trim();
@@ -162,7 +184,17 @@ export default function Page() {
       {/* Hero */}
       <header className="hero">
         <div className="container">
-          <div className="eyebrow">ToolBench · Session-Aware Re-Ranking</div>
+          <div className="eyebrow">
+            ToolBench · Session-Aware Re-Ranking ·{" "}
+            <a
+              href="https://www.kaggle.com/competitions/gemma-4-good-hackathon"
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "inherit", textDecoration: "underline" }}
+            >
+              Gemma 4 Good Hackathon submission
+            </a>
+          </div>
           <h1>SessionRerank</h1>
           <p className="tagline">
             History-aware tool re-ranking for LLM agents — outperforming BM25,
@@ -181,6 +213,16 @@ export default function Page() {
               Try the live demo ↓
             </a>
           </div>
+          {metrics?.config?.timestamp && (
+            <div className="hero-timestamp">
+              Results last updated:{" "}
+              <strong>
+                {new Date(metrics.config.timestamp).toLocaleString()}
+              </strong>
+              {" · encoder: "}
+              <code>{metrics.config.encoder}</code>
+            </div>
+          )}
         </div>
       </header>
 
@@ -325,7 +367,7 @@ export default function Page() {
           Captions follow IEEE / ACM convention.
         </p>
         <div className="figure-grid">
-          {FIGURES.map((f) => (
+          {figures.map((f) => (
             <figure key={f.file} className="figure-card">
               <img src={`/figures/${f.file}`} alt={f.caption} />
               <figcaption>{f.caption}</figcaption>

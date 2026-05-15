@@ -349,3 +349,11 @@ strong.winner { color: #065f46; }
 
 /* Reset main constraint so the hero spans full width */
 main { max-width: none; margin: 0; padding: 0; }
+
+.hero-timestamp {
+  margin-top: 22px; font-size: 13px; color: var(--muted);
+}
+.hero-timestamp code {
+  background: rgba(15, 23, 42, 0.06); padding: 1px 6px;
+  border-radius: 4px; font-size: 12px;
+}
