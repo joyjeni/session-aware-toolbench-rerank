@@ -29,9 +29,15 @@ Kaggle hackathons accept submissions as **Kaggle Writeups** (a special kind of N
    - Title: `SessionRerank-Gemma — Gemma 4 Good Hackathon Submission`.
    - Description should include the GitHub + Vercel + Colab links so judges can click through.
 
-3. **Run the Colab notebook once end-to-end.** This generates the real Gemma 4 numbers that fill in the *populated by Colab* rows of the writeup.
-   - Free T4 takes ~50 min. Pro A100 takes ~15 min.
-   - The last cell pushes results to GitHub → Vercel auto-redeploys → your dashboard now shows Gemma numbers.
+3. **Run the notebook end-to-end on Kaggle (recommended) or Colab.** This generates the real Gemma 4 numbers that fill in the *populated by Colab* rows of the writeup.
+   - **Kaggle (preferred):** P100 / T4 x2 free, Gemma 4 mounts directly from Kaggle Models so no HF token needed. ~25–50 min depending on accelerator.
+     - Open the competition page → *Code → New Notebook* → *File → Import* (paste this notebook's GitHub URL).
+     - Right sidebar → *+ Add Model* → search `google/gemma-4` → attach `transformers / 270m` **and** `transformers / 270m-it`.
+     - *Settings → Accelerator → GPU T4 x2*.
+     - *Add-ons → Secrets* → add `GH_TOKEN` (only if you want the auto-push step to run).
+     - *Run All*.
+   - **Colab (alternative):** Free T4 ~50 min, Pro A100 ~15 min. Requires an HF token (see below).
+   - The final cell optionally pushes results to GitHub → Vercel auto-redeploys → your dashboard now shows Gemma numbers.
 
 4. **Save the Colab notebook to Kaggle.**
    - On the competition page click **Code → New Notebook**.
@@ -54,6 +60,19 @@ Kaggle hackathons accept submissions as **Kaggle Writeups** (a special kind of N
 > "Your fine-tuned model can be submitted to multiple tracks, not just Unsloth, as long as it meets the criteria for each one." — [Daniel Han, Unsloth](https://www.linkedin.com/posts/danielhanchen_google-deepmind-is-hosting-a-gemma-4-hackathon-activity-7448365186417078272--udd)
 
 Because we use Unsloth for the fine-tune, we also qualify for the **Unsloth $10K track**. Add `#unsloth` and reference Unsloth in the writeup (already done in §6 of `kaggle_writeup.md`). Some hackathon pages let you tag multiple tracks; if Kaggle only allows one primary, **submit twice** with the same notebook URL, each tagged for a different track.
+
+## What is an HF token? (only needed if running on Colab, not Kaggle)
+
+HF = **Hugging Face**, the platform that hosts the open-source Gemma 4 weights. Gemma is *gated*, so Hugging Face wants to know who's downloading it.
+
+1. Sign up at https://huggingface.co/join (free)
+2. Visit https://huggingface.co/google/gemma-4-270m and https://huggingface.co/google/gemma-4-270m-it — click **"Acknowledge license"** on each
+3. Go to https://huggingface.co/settings/tokens → **+ Create new token** → type *Read* → copy the `hf_...` string
+4. Paste it when the notebook prompts `HF token:`
+
+Treat the token like a password — don't commit it to GitHub or paste it into chat. The notebook uses `getpass()` so it stays hidden as you type.
+
+On **Kaggle** you don't need any of this if you attach Gemma 4 from Kaggle Models (sidebar → + Add Model). The notebook auto-detects this.
 
 ## Common pitfalls
 
