@@ -215,13 +215,17 @@ def fit_weights(base_retriever,
             loss.backward()
             opt.step()
             total += float(loss.item())
+        with torch.no_grad():
+            wb_, wc_, ws_, we_ = (float(torch.exp(w[i]).detach()) for i in range(4))
         print(f"[fit] epoch {epoch+1}/{epochs}  loss={total/len(tuples):.4f}  "
-              f"w_base={float(torch.exp(w[0])):.3f}  w_cat={float(torch.exp(w[1])):.3f}  "
-              f"w_sch={float(torch.exp(w[2])):.3f}  w_ept={float(torch.exp(w[3])):.3f}")
+              f"w_base={wb_:.3f}  w_cat={wc_:.3f}  "
+              f"w_sch={ws_:.3f}  w_ept={we_:.3f}")
 
+    with torch.no_grad():
+        wexp = torch.exp(w).detach()
     return dict(
-        w_base=float(torch.exp(w[0])),
-        w_cat=float(torch.exp(w[1])),
-        w_sch=float(torch.exp(w[2])),
-        w_ept=float(torch.exp(w[3])),
+        w_base=float(wexp[0]),
+        w_cat=float(wexp[1]),
+        w_sch=float(wexp[2]),
+        w_ept=float(wexp[3]),
     )
