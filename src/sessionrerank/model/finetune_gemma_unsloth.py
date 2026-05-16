@@ -174,6 +174,15 @@ def train(
         random_state=0,
     )
 
+    # Auto-detect bf16 support. Ampere+ (sm_80+) supports bf16; Turing (T4, sm_75)
+    # does NOT and Tesla T4 is the default Kaggle/Colab free GPU. Fall back to
+    # fp16 mixed precision in that case.
+    import torch as _torch
+    use_bf16 = bool(_torch.cuda.is_available() and _torch.cuda.is_bf16_supported())
+    use_fp16 = not use_bf16
+    print(f"[finetune] precision: {'bf16' if use_bf16 else 'fp16'} "
+          f"(cuda_capability={_torch.cuda.get_device_capability() if _torch.cuda.is_available() else 'cpu'})")
+
     cfg = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
@@ -184,7 +193,8 @@ def train(
         logging_steps=20,
         save_steps=500,
         save_total_limit=2,
-        bf16=True,
+        bf16=use_bf16,
+        fp16=use_fp16,
         max_seq_length=max_seq_len,
         report_to="none",
         dataset_text_field="text",
