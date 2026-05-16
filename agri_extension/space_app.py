@@ -23,54 +23,124 @@ from karnataka_apis import KARNATAKA_APIS
 # Single shared model instance (cold-loaded once)
 _RANKER = SessionRerankPlus()
 
-# --- Season auto-detection (India / Karnataka calendar) -------------------
-#   Kharif : Jun – Oct  (monsoon sowing → autumn harvest)
-#   Rabi   : Nov – Mar  (post-monsoon sowing → spring harvest)
-#   Zaid   : Apr – May  (summer, irrigation-only short cycle)
-# Labels match what KSDA / Raitha Mitra extension officers print on field cards.
+# --- Season auto-detection from live temperature + rainfall ---------------
+# Karnataka cropping seasons (UAS-B Extension, KSNDMC agro-met advisories):
+#   Kharif : monsoon active           → Tmax ≤ 32 °C AND 7-day rain ≥ 20 mm
+#   Zaid   : hot dry pre-monsoon      → Tmax ≥ 33 °C AND 7-day rain <  20 mm
+#   Rabi   : cool dry post-monsoon    → Tmin ≤ 20 °C AND 7-day rain <  20 mm
+# We pull current weather from Open-Meteo (free, no key) for the selected district.
+
+import urllib.request
+import json as _json
 
 SEASON_CHOICES = [
-    ("Kharif — Monsoon Sowing (Jun–Oct)", "kharif"),
-    ("Rabi — Winter / Harvest Season (Nov–Mar)", "rabi"),
-    ("Zaid — Summer Short Cycle (Apr–May)", "zaid"),
+    ("Kharif — Monsoon Sowing",      "kharif"),
+    ("Rabi — Winter / Harvest Season", "rabi"),
+    ("Zaid — Summer Short Cycle",     "zaid"),
 ]
 
+# Approximate centroids for each Karnataka district in the dropdown.
+DISTRICT_LATLON = {
+    "Tumakuru":          (13.34, 77.10),
+    "Mandya":            (12.52, 76.90),
+    "Mysuru":            (12.30, 76.65),
+    "Kolar":             (13.14, 78.13),
+    "Chikkaballapur":    (13.43, 77.73),
+    "Chitradurga":       (14.23, 76.40),
+    "Hassan":            (13.00, 76.10),
+    "Belagavi":          (15.85, 74.50),
+    "Dharwad":           (15.46, 75.01),
+    "Koppal":            (15.35, 76.16),
+    "Raichur":           (16.20, 77.36),
+    "Ballari":           (15.14, 76.92),
+    "Shivamogga":        (13.93, 75.57),
+    "Udupi":             (13.34, 74.74),
+    "Dakshina Kannada":  (12.87, 74.84),
+    "Uttara Kannada":    (14.80, 74.13),
+    "Bengaluru Rural":   (13.23, 77.71),
+}
 
-def detect_season(today: datetime.date | None = None) -> str:
-    """Return 'kharif' | 'rabi' | 'zaid' for the given date (defaults to today, IST)."""
-    if today is None:
-        # IST = UTC + 5:30; use naive IST for stability inside the Space.
-        today = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
-    m = today.month
-    if 6 <= m <= 10:
-        return "kharif"  # Jun–Oct: monsoon sowing
-    if m >= 11 or m <= 3:
-        return "rabi"    # Nov–Mar: winter / harvest
-    return "zaid"        # Apr–May: summer short cycle
+
+def _fetch_weather(lat: float, lon: float, timeout: float = 4.0) -> dict | None:
+    """Open-Meteo current temp + 7-day rainfall + Tmax/Tmin. Returns None on failure."""
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&current=temperature_2m,relative_humidity_2m"
+        "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum"
+        "&past_days=7&forecast_days=1&timezone=Asia%2FKolkata"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return _json.loads(r.read().decode())
+    except Exception:
+        return None
 
 
-def season_banner(season: str) -> str:
-    today = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
+def detect_season(district: str = "Tumakuru") -> tuple[str, dict]:
+    """Return (season, telemetry) for the live weather at this district."""
+    lat, lon = DISTRICT_LATLON.get(district, DISTRICT_LATLON["Tumakuru"])
+    data = _fetch_weather(lat, lon)
+    if not data:
+        # Conservative fallback: kharif (monsoon is the most common KA regime).
+        return "kharif", {"source": "fallback (weather unavailable)", "district": district}
+
+    cur_t = float(data["current"]["temperature_2m"])
+    daily = data["daily"]
+    tmax_week = max(daily["temperature_2m_max"][:7])
+    tmin_week = min(daily["temperature_2m_min"][:7])
+    rain_week = sum(daily["precipitation_sum"][:7])
+
+    if tmax_week <= 32 and rain_week >= 20:
+        season = "kharif"
+    elif tmin_week <= 20 and rain_week < 20:
+        season = "rabi"
+    elif tmax_week >= 33 and rain_week < 20:
+        season = "zaid"
+    else:
+        # Transitional: bias toward whichever signal is strongest.
+        if rain_week >= 20: season = "kharif"
+        elif tmax_week >= 33: season = "zaid"
+        else: season = "rabi"
+
+    telemetry = {
+        "source": "Open-Meteo (live)",
+        "district": district,
+        "current_temp_c": cur_t,
+        "tmax_week_c": tmax_week,
+        "tmin_week_c": tmin_week,
+        "rain_7d_mm": round(rain_week, 1),
+    }
+    return season, telemetry
+
+
+def season_banner(season: str, district: str = "Tumakuru") -> str:
     blurbs = {
         "kharif": (
-            "🌧️ **Kharif — Monsoon Sowing Season.** Southwest monsoon brings rain; "
-            "farmers sow ragi, paddy, jowar, maize, cotton, tur. Harvest in Oct–Nov."
+            "🌧️ **Kharif — Monsoon Sowing Season.** Southwest monsoon active; "
+            "sow ragi, paddy, jowar, maize, cotton, tur. Harvest after monsoon retreats."
         ),
         "rabi": (
-            "❄️ **Rabi — Winter & Harvest Season.** Sown on residual soil moisture + irrigation. "
-            "Wheat, chickpea, mustard, rabi jowar. Harvest in Feb–Apr."
+            "❄️ **Rabi — Winter & Harvest Season.** Cool & dry; sown on residual moisture + "
+            "irrigation. Wheat, chickpea, mustard, rabi jowar. Harvest before summer heat."
         ),
         "zaid": (
-            "☀️ **Zaid — Summer Short Cycle.** 100% irrigation; only borewell / canal-fed farms. "
+            "☀️ **Zaid — Summer Short Cycle.** Hot & dry; 100% irrigation (borewell / canal). "
             "Watermelon, cucumber, summer moong, fodder crops."
         ),
     }
-    detected = detect_season(today)
-    suffix = "" if season == detected else (
-        f"  \n_Today is **{today.strftime('%d %b %Y')}** → auto-detected season is "
-        f"**{detected}**. You have manually overridden to **{season}**._"
-    )
-    return blurbs[season] + suffix
+    detected, tele = detect_season(district)
+    if tele.get("source") == "Open-Meteo (live)":
+        reading = (
+            f"  \n_Live in **{district}**: current {tele['current_temp_c']:.1f}°C · "
+            f"7-day Tmax {tele['tmax_week_c']:.1f}°C · Tmin {tele['tmin_week_c']:.1f}°C · "
+            f"rainfall {tele['rain_7d_mm']} mm → auto-detected **{detected}**._"
+        )
+    else:
+        reading = f"  \n_Weather feed unavailable; defaulting to **{detected}**._"
+    if season != detected:
+        reading += f"  \n_You have manually overridden to **{season}**._"
+    return blurbs[season] + reading
 
 # In-memory single-user demo session
 _SESSION: dict = {"state": None}
@@ -223,13 +293,19 @@ with gr.Blocks(
                 [("Kannada (ಕನ್ನಡ)", "kn"), ("English", "en"), ("Hindi (हिंदी)", "hi")],
                 value="kn", label="Preferred language",
             )
+            _initial_season, _ = detect_season("Tumakuru")
             season = gr.Dropdown(
                 SEASON_CHOICES,
-                value=detect_season(),
-                label=f"Season (auto-detected from today's date — IST)",
+                value=_initial_season,
+                label="Season (auto-detected from live temperature + 7-day rainfall)",
             )
-        season_info = gr.Markdown(season_banner(detect_season()))
-        season.change(season_banner, inputs=season, outputs=season_info)
+        season_info = gr.Markdown(season_banner(_initial_season, "Tumakuru"))
+        season.change(season_banner, inputs=[season, district], outputs=season_info)
+
+        def _on_district_change(d):
+            det, _ = detect_season(d)
+            return det, season_banner(det, d)
+        district.change(_on_district_change, inputs=district, outputs=[season, season_info])
         setup_btn = gr.Button("Save Profile", variant="primary")
         setup_status = gr.Textbox(label="Status", interactive=False)
         setup_btn.click(setup_profile,
