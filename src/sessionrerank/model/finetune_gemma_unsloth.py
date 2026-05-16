@@ -183,6 +183,23 @@ def train(
     print(f"[finetune] precision: {'bf16' if use_bf16 else 'fp16'} "
           f"(cuda_capability={_torch.cuda.get_device_capability() if _torch.cuda.is_available() else 'cpu'})")
 
+    # Defense-in-depth: Unsloth caches a compiled SFTTrainer at
+    # /kaggle/working/repo/unsloth_compiled_cache/UnslothSFTTrainer.py and may
+    # hardcode bf16=True. Nuke any stale compiled cache so it gets regenerated
+    # from the *current* args (i.e. with fp16=True on Turing).
+    import shutil
+    for cache_dir in (
+        "unsloth_compiled_cache",
+        "/kaggle/working/repo/unsloth_compiled_cache",
+        os.path.expanduser("~/.cache/unsloth"),
+    ):
+        if os.path.isdir(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+                print(f"[finetune] cleared stale Unsloth cache: {cache_dir}")
+            except Exception as e:
+                print(f"[finetune] could not clear {cache_dir}: {e}")
+
     cfg = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
