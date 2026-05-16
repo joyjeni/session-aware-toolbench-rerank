@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import random
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
@@ -220,17 +221,75 @@ def train(
     print("[finetune] starting training …")
     trainer.train()
 
-    print(f"[finetune] saving merged model to {output_dir}/merged")
+    # ------------------------------------------------------------------
+    # Disk-space hygiene before the 9.5 GB merged-model save.
+    # On Kaggle, /kaggle/working is only 20 GB. Without cleanup we'd hit
+    # ENOSPC mid-write. Remove:
+    #   * intermediate trainer checkpoints (checkpoint-XXX/) — we only need
+    #     the final merged weights
+    #   * Unsloth's compiled-cache directories (regenerable)
+    #   * any local HF hub cache from this run (the base model is already
+    #     mounted read-only at /kaggle/input/models/...)
+    # ------------------------------------------------------------------
+    import shutil
+    def _du(path):
+        try:
+            out = subprocess.check_output(["du", "-sh", path], stderr=subprocess.DEVNULL).decode().split()[0]
+            return out
+        except Exception:
+            return "?"
+    print(f"[finetune] disk usage pre-cleanup: output_dir={_du(output_dir)}")
+    for pat in ("checkpoint-*",):
+        for sub in Path(output_dir).glob(pat):
+            if sub.is_dir():
+                shutil.rmtree(sub, ignore_errors=True)
+                print(f"[finetune] removed {sub}")
+    for d in ("unsloth_compiled_cache",
+              "/kaggle/working/repo/unsloth_compiled_cache",
+              os.path.expanduser("~/.cache/unsloth")):
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    print(f"[finetune] disk free:")
+    try:
+        subprocess.run(["df", "-h", "/kaggle/working"], check=False)
+    except Exception:
+        pass
+
+    # Always save the LoRA adapter first — it's <500 MB and is enough to
+    # reproduce inference (apply on top of the read-only base model).
+    print(f"[finetune] saving LoRA adapter to {output_dir}/adapter")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    model.save_pretrained_merged(f"{output_dir}/merged", tokenizer, save_method="merged_16bit")
-    with open(f"{output_dir}/training_meta.json", "w") as f:
-        json.dump({
-            "base_model": base_model,
-            "n_examples": len(examples),
-            "epochs": epochs,
-            "lr": lr,
-            "lora_r": lora_r,
-        }, f, indent=2)
+    try:
+        model.save_pretrained(f"{output_dir}/adapter")
+        tokenizer.save_pretrained(f"{output_dir}/adapter")
+    except OSError as e:
+        print(f"[finetune] WARNING: adapter save failed: {e}")
+
+    print(f"[finetune] saving merged model to {output_dir}/merged")
+    try:
+        model.save_pretrained_merged(
+            f"{output_dir}/merged", tokenizer, save_method="merged_16bit")
+    except OSError as e:
+        print(f"[finetune] WARNING: merged save failed (likely ENOSPC): {e}")
+        print(f"[finetune] LoRA adapter is still at {output_dir}/adapter "
+              f"and can be used for inference.")
+
+    # The meta file is tiny (a few hundred bytes) but disk may still be
+    # ~100% full after a 9.5 GB save. Make this non-fatal so a successful
+    # 37-minute finetune isn't lost over a metadata write.
+    try:
+        with open(f"{output_dir}/training_meta.json", "w") as f:
+            json.dump({
+                "base_model": base_model,
+                "n_examples": len(examples),
+                "epochs": epochs,
+                "lr": lr,
+                "lora_r": lora_r,
+                "precision": "bf16" if use_bf16 else "fp16",
+            }, f, indent=2)
+    except OSError as e:
+        print(f"[finetune] WARNING: could not write training_meta.json: {e} "
+              f"(merged model at {output_dir}/merged is still intact)")
     print("[finetune] done")
 
 
