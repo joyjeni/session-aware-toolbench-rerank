@@ -85,7 +85,7 @@ This is the kind of "AI-for-the-places-that-need-it-most" framing the hackathon 
 - Fine-tuned Gemma 4 e2b LoRA adapter (~400 MB) on the same repo, [merged checkpoint](https://www.kaggle.com/datasets/joyjeni/gemma4-sessionrerank-merged) on Kaggle Datasets.
 - Karnataka API catalog as a structured Python module — drop-in for any other Indian agri agent.
 - Pheromone prior is one file (`src/sessionrerank/model/pheromone.py`), pure-Python, no PyTorch.
-- Live Gradio demo: [demo link in repo README].
+- Live Gradio demo: https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant
 
 ## What's Next
 

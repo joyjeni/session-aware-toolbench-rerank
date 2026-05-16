@@ -2,7 +2,7 @@
 
 > **Gemma 4 Good Hackathon · Main Track submission (May 2026)** — nature-inspired session-aware re-ranking that turns Gemma 4 into a field-deployable agricultural extension officer for 8.5M Karnataka farmers.
 >
-> 📄 **[Kaggle Writeup](./WRITEUP.md)**  ·  🎬 **[Video script](./VIDEO_SCRIPT.md)**  ·  🐍 **[Pheromone prior (250 lines)](./src/sessionrerank/model/pheromone.py)**  ·  🌾 **[Karnataka API catalog](./agri_extension/karnataka_apis.py)**  ·  🤖 **[Gradio demo](./agri_extension/gradio_demo.py)**
+> 🚀 **[Live demo on Hugging Face](https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant)**  ·  📄 **[Kaggle Writeup](./WRITEUP.md)**  ·  🎬 **[Video script](./VIDEO_SCRIPT.md)**  ·  🐍 **[Pheromone prior](./src/sessionrerank/model/pheromone.py)**  ·  🌾 **[Karnataka API catalog](./agri_extension/karnataka_apis.py)**
 
 **Two layers in one repo:**
 
@@ -67,7 +67,8 @@ python -m sessionrerank.eval.run_all --device cpu --encoder all-MiniLM-L6-v2
 Open `notebooks/run_on_colab.ipynb`, run all cells.
 
 ## Web demo
-- **Karnataka agri demo:** `agri_extension/gradio_demo.py` (Hugging Face Space).
+- **Karnataka agri demo (live):** https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant
+- **Source:** `agri_extension/gradio_demo.py` (mirrored to the HF Space at `app.py`).
 - **Benchmark dashboard:** `web/` — Next.js on Vercel.
 
 ## Method
