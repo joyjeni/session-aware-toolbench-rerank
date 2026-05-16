@@ -1,28 +1,31 @@
-# BioRerank · SessionRerank: Pheromone-Guided Tool Retrieval for Karnataka Smallholder Agriculture
+# SessionRerank+ : Co-activation Cached Tool Retrieval for Karnataka Smallholder Agriculture
 
-> **Gemma 4 Good Hackathon · Main Track submission (May 2026)** — nature-inspired session-aware re-ranking that turns Gemma 4 into a field-deployable agricultural extension officer for 8.5M Karnataka farmers.
+> **Gemma 4 Good Hackathon · Main Track submission (May 2026)** — session-aware re-ranking that turns Gemma 4 into a field-deployable agricultural extension officer for 8.5M Karnataka farmers.
 >
-> 🚀 **[Live demo on Hugging Face](https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant)**  ·  📄 **[Kaggle Writeup](./WRITEUP.md)**  ·  🎬 **[Video script](./VIDEO_SCRIPT.md)**  ·  🐍 **[Pheromone prior](./src/sessionrerank/model/pheromone.py)**  ·  🌾 **[Karnataka API catalog](./agri_extension/karnataka_apis.py)**
+> 🚀 **[Live demo on Hugging Face (Gemma 4 in the runtime)](https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant)**  ·  📄 **[Kaggle Writeup](./WRITEUP.md)**  ·  🎬 **[Video script](./VIDEO_SCRIPT.md)**  ·  🐍 **[Co-activation cache](./src/sessionrerank/model/coactivation.py)**  ·  🌾 **[Karnataka API catalog](./agri_extension/karnataka_apis.py)**
 
 **Two layers in one repo:**
 
-1. **SessionRerank** — the underlying research contribution. Lightweight re-ranking layer on top of ToolBench's neural API retriever (ToolLLM). Within a multi-turn session, successful tool-call outcomes are encoded as positive reinforcement signals that **dynamically bias future retrieval** toward API categories, schema structures, endpoint patterns, and (new in this submission) **ant-colony pheromone trails** over (api_a → api_b) transitions.
-2. **BioRerank · Karnataka agri** — the demo + deployment layer. 15 real Karnataka government and para-statal APIs (KSNDMC, Bhoomi, Raitha Mitra, KSDA, K-Kisan, Agmarknet KA, PM-KISAN, PMFBY, KMF Nandini, …) routed by SessionRerank + Gemma 4 e2b fine-tuned on ToolBench multi-turn trajectories with Unsloth.
+1. **SessionRerank** — the underlying research contribution. Lightweight re-ranking layer on top of ToolBench's neural API retriever (ToolLLM). Within a multi-turn session, successful tool-call outcomes are encoded as positive reinforcement signals that **dynamically bias future retrieval** toward API categories, schema structures, endpoint patterns, and (new in this submission) **a co-activation cache** over (api_a → api_b) transitions.
+2. **SessionRerank+ Karnataka agri** — the demo + deployment layer. 15 real Karnataka government and para-statal APIs (KSNDMC, Bhoomi, Raitha Mitra, KSDA, K-Kisan, Agmarknet KA, PM-KISAN, PMFBY, KMF Nandini, …) routed by SessionRerank+ with **real Gemma 4 embeddings** via the Hugging Face Inference API.
 
 ## What's new for the hackathon (May 16, 2026)
 
-- **`PheromoneCoocPrior`** — ACO-style τ-deposit + ρ-decay over successful tool transitions. Drop-in replacement for the static `CooccurrencePrior`, time-varying, gets sharper *during* a session. Pure NumPy, < 250 lines, no PyTorch.
-- **Stage 4 Gemma cascade wiring** — fine-tuned Gemma 4 e2b LoRA model now appears as a real method column in the eval table (`_GemmaCascade` in `eval/run_all.py`).
-- **`agri_extension/`** — Karnataka API catalog (15 real services with Kannada labels), `BioRerankAgri` glue layer, Gradio demo, expert-seeded pheromone chains from KSDA SOP-2024.
+- **Real Gemma 4 in the live demo runtime** (`gemma_embed.py` on the HF Space) — every query and the catalog are embedded by `google/embeddinggemma-300m` through HF Inference. The response card surfaces which path served the request so judges can verify Gemma is in the loop. A MiniLM fallback keeps the UX responsive on cold starts.
+- **`CoactivationCache`** — δ-increment + ρ-decay over successful tool transitions. Drop-in replacement for the static `CooccurrencePrior`, time-varying, gets sharper *during* a session. Pure NumPy, ~250 lines, no PyTorch.
+- **Stage 4 Gemma cascade wiring** — fine-tuned Gemma 4 e2b LoRA model appears as a real method column in the eval table (`_GemmaCascade` in `eval/run_all.py`).
+- **`agri_extension/`** — Karnataka API catalog (15 real services with Kannada labels), `SessionRerankPlus` glue layer, expert-seeded co-activation edges from KSDA SOP-2024.
 
 ## Run the live demo locally
 
 ```bash
 pip install -r agri_extension/requirements.txt
-python agri_extension/gradio_demo.py   # http://localhost:7860
+# Optional: HF_TOKEN env var enables Gemma 4 via HF Inference (free, ~50ms/req)
+# Without it, the demo falls back to MiniLM and labels the path accordingly.
+python -m agri_extension.sessionrerank_plus   # smoke test
 ```
 
-Set your farmer profile (crop, district, language, season), ask in Kannada or English, watch the **Pheromone Trails** tab fill up as the system reinforces successful tool-chain transitions in real time.
+The canonical UI is the HF Space (`biorerank_space/app.py` in workspace). To launch a local Gradio: set your farmer profile (crop, district, language, season), ask in Kannada or English, watch the **Co-activation Edges** tab fill up as the system reinforces successful tool-chain transitions in real time.
 
 
 ## TL;DR results (full ToolBench G1/G2/G3 benchmark, session regime, NDCG@5)
@@ -44,16 +47,18 @@ verbatim from `results/metrics.json`.
 src/sessionrerank/
   data/         ToolBench loaders, multi-turn session extractor
   baselines/    BM25, dense (ToolLLM), ToolRerank reimplementation
-  model/        SessionRerank: history-aware reranker
+  model/        SessionRerank + CoactivationCache (history-aware reranker)
   eval/         Hit@K, NDCG@K, paired-t / Wilcoxon
   viz/          Publication-ready charts (Matplotlib + Seaborn)
+agri_extension/
+  sessionrerank_plus.py    SessionRerank+ glue: dense + profile mask + co-activation
+  gemma_embed.py           Gemma 4 via HF Inference API (with MiniLM fallback)
+  karnataka_apis.py        15 real KA government APIs
 notebooks/
   run_on_colab.ipynb       full T4 training + eval pipeline
 results/
   metrics.json             machine-readable metrics
   figures/                 PDF + PNG + SVG charts
-web/                       Next.js dashboard (Vercel)
-paper/                     Method writeup with equations
 ```
 
 ## Quickstart (CPU, full benchmark, ~minutes)
@@ -67,18 +72,17 @@ python -m sessionrerank.eval.run_all --device cpu --encoder all-MiniLM-L6-v2
 Open `notebooks/run_on_colab.ipynb`, run all cells.
 
 ## Web demo
-- **Karnataka agri demo (live):** https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant
-- **Source:** `agri_extension/gradio_demo.py` (mirrored to the HF Space at `app.py`).
-- **Benchmark dashboard:** `web/` — Next.js on Vercel.
+- **Karnataka agri demo (live, Gemma 4 in the runtime):** https://huggingface.co/spaces/abigailcreations/karnataka-agri-assistant
+- **Space source mirror:** `biorerank_space/` in workspace (canonical) → pushed to HF Space at `app.py`.
 
 ## Method
-See `paper/method.md` for the static formulation and `WRITEUP.md` for the pheromone extension. In one line:
-> Score(v | q, H) = w·dense(q,v) + w·profile(v) + w·Σ γ^(n−i) log(1 + τ_{h_i, v}) — where τ is a session-time-varying ant-colony pheromone matrix laid down on successful (a→b) tool transitions and evaporating by ρ each session.
+See `paper/method.md` for the static formulation and `WRITEUP.md` for the co-activation extension. In one line:
+> Score(v | q, H) = w_dense·dense(q,v) + w_mask·profile(v) + w_co·Σ γ^(n−i) log(1 + w_{h_i, v}) — where w_{u,v} is a session-time-varying co-activation edge weight, incremented by δ on successful (a→b) transitions and decaying by ρ each session.
 
 ## Citation
 ```
 @misc{sessionrerank2026,
-  title  = {SessionRerank: Emergent Session-Level Personalization for Tool Retrieval},
+  title  = {SessionRerank+: Co-activation Cached Tool Retrieval for Multi-turn Agentic LLMs},
   author = {Abigail Creations},
   year   = {2026},
   url    = {https://github.com/joyjeni/session-aware-toolbench-rerank}

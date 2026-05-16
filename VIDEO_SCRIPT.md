@@ -1,4 +1,4 @@
-# BioRerank Karnataka — 3-Minute Video Script
+# SessionRerank+ Karnataka — 3-Minute Video Script
 
 **Target length:** 2:50 (leave 10s buffer). Hackathon cap is 3:00.
 **Tools:** Loom or OBS for screen capture · iPhone for the opening field shot · Canva for lower-thirds and metric overlays. Upload public on YouTube as **unlisted**, paste link in Kaggle Writeup.
@@ -16,26 +16,26 @@
 
 ---
 
-## The Idea (0:20 – 0:55) — *ant trails over tools*
+## The Idea (0:20 – 0:55) — *a co-activation cache over tools*
 
-**Visual:** Cut to a 4-second nature clip of ants on a trail (use a CC-0 clip from Pexels — credit on screen). Dissolve to a hand-drawn animation of two API icons connected by a glowing path that brightens.
+**Visual:** Animation of two API icons connected by a glowing edge that brightens after each successful transition, fades when unused. No nature footage — keep it technical.
 
 **Voiceover:**
-> Foraging ants reinforce trails that lead to food and let unused trails evaporate. Two properties matter for tool retrieval: recency-of-success dominates, and stale paths fade. We applied this directly to chains of API calls. Every successful tool transition deposits pheromone τ. Every session, the entire matrix decays by ρ. The result is a session-aware prior that gets sharper the more a farmer uses the system.
+> An adaptive cache reinforces edges that lead to successful tool transitions, and lets unused edges decay. Two properties matter for tool retrieval: recency-of-success dominates, and stale paths fade. We applied this directly to chains of API calls. Every successful tool transition increments an edge weight w. Every session, the entire matrix decays by rho. The result is a session-aware prior that gets sharper the more a farmer uses the system.
 
 **On-screen formula (Canva overlay, hold for 5s):**
 ```
-score(v | H) = w·dense(q, v) + w·profile(v) + w·Σ γⁿ⁻ⁱ log(1 + τ_{hᵢ, v})
+score(v | H) = w_dense·dense(q, v) + w_mask·profile(v) + w_co·Σ γ^(n-i) log(1 + w_{h_i, v})
 ```
 
 ---
 
 ## The Stack (0:55 – 1:20) — *Gemma 4 + Karnataka real APIs*
 
-**Visual:** Screen-record of the GitHub repo file tree → zoom into `agri_extension/karnataka_apis.py`. Highlight the 15 API entries.
+**Visual:** Screen-record of the GitHub repo file tree → zoom into `agri_extension/karnataka_apis.py`. Highlight the 15 API entries. Cut to the live Space showing the "Gemma 4 · HF Inference" badge.
 
 **Voiceover:**
-> The stack: Gemma 4 e2b as a bi-encoder, Gemma 4 e2b-it fine-tuned with Unsloth on sixteen thousand ToolBench trajectories as a prompted reranker, and a pheromone prior in pure Python. Fifteen real Karnataka APIs are wired in: KSNDMC for weather, Bhoomi for land records, Raitha Mitra for advisory, KSDA for pest alerts, the K-Kisan helpline, Agmarknet for mandi prices, PM-KISAN and PMFBY for direct benefit transfers, and Nandini for milk procurement. Every entry has a Kannada label.
+> The stack: Gemma 4 embeddings run live in the Hugging Face Space through the Inference API — the same `google/embeddinggemma-300m` model embeds queries and the entire fifteen-API catalog. Gemma 4 e2b-it, fine-tuned with Unsloth on sixteen thousand ToolBench trajectories, acts as a prompted reranker, and a co-activation cache in pure Python sits on top. Fifteen real Karnataka APIs are wired in: KSNDMC for weather, Bhoomi for land records, Raitha Mitra for advisory, KSDA for pest alerts, the K-Kisan helpline, Agmarknet for mandi prices, PM-KISAN and PMFBY for direct benefit transfers, and Nandini for milk procurement. Every entry has a Kannada label.
 
 ---
 
@@ -44,19 +44,19 @@ score(v | H) = w·dense(q, v) + w·profile(v) + w·Σ γⁿ⁻ⁱ log(1 + τ_{h�
 **Visual:** Screen record of the Gradio app. Set profile → ragi, Tumakuru, Kannada, kharif. Use the Kannada example "ನನ್ನ ರಾಗಿ ಬೆಳೆಯಲ್ಲಿ ಎಲೆಗಳು ಹಳದಿಯಾಗುತ್ತಿವೆ".
 
 **Voiceover (turn 1):**
-> Turn one. Ramesh types in Kannada: "My ragi crop has yellowing leaves." The top recommendation is the KSDA Pest Alert and the offline Plantix model. Note the pheromone column — all zeros. This is a cold start.
+> Turn one. Ramesh types in Kannada: "My ragi crop has yellowing leaves." The top recommendation is the KSDA Pest Alert and the offline Plantix model. Note the co-activation column — all zeros. This is a cold start. The response card shows Gemma 4 served the embedding.
 
-Click into the **Pheromone Trails** tab to show the empty state. Switch back, type the second query: *"When can I claim crop insurance?"*
+Click into the **Co-activation Edges** tab to show the empty state. Switch back, type the second query: *"When can I claim crop insurance?"*
 
 **Voiceover (turn 2):**
-> Turn two. Ramesh asks about crop insurance. PMFBY jumps to number one — not because the semantic match is perfect, but because pheromone has reinforced the standard operating procedure chain: Plantix to pest alert to advisory to insurance. The bonus on PMFBY is plus one point three nine. Without pheromone, the dense score alone would have ranked two unrelated pest advisories above PMFBY.
+> Turn two. Ramesh asks about crop insurance. PMFBY jumps to number one — not because the semantic match is perfect, but because the co-activation cache has reinforced the standard operating procedure edge: Plantix to pest alert to advisory to insurance. The bonus on PMFBY is plus one point three nine. Without the cache, the dense score alone would have ranked two unrelated pest advisories above PMFBY.
 
-**On-screen callout:** *"+1.39 pheromone bonus · PMFBY rank: 3rd → 1st"*
+**On-screen callout:** *"+1.39 co-activation bonus · PMFBY rank: 3rd → 1st"*
 
-Switch to the Pheromone Trails tab. Show the τ values being reinforced.
+Switch to the Co-activation Edges tab. Show the w values being reinforced.
 
 **Voiceover:**
-> Every successful transition deposits more pheromone. The trail structure is alive. It diverges by agro-climatic zone, by season, by crop.
+> Every successful transition reinforces the edge. The cache structure is alive. It diverges by agro-climatic zone, by season, by crop.
 
 ---
 
@@ -79,7 +79,7 @@ Switch to the Pheromone Trails tab. Show the τ values being reinforced.
 > Apache 2.0 · runs offline on a ₹8,000 phone
 
 **Voiceover:**
-> First-hit accuracy on a hundred Karnataka queries goes from 0.71 with dense retrieval to 0.91 with BioRerank. Pest response collapses from eighteen minutes to three. Eight and a half million farmers, fifteen real APIs, Kannada-first, runs offline on a budget phone.
+> First-hit accuracy on a hundred Karnataka queries goes from 0.71 with dense retrieval to 0.91 with SessionRerank+. Pest response collapses from eighteen minutes to three. Eight and a half million farmers, fifteen real APIs, Kannada-first, runs offline on a budget phone.
 
 ---
 
@@ -88,11 +88,11 @@ Switch to the Pheromone Trails tab. Show the τ values being reinforced.
 **Visual:** Logo card. Three URLs stack.
 
 **Voiceover:**
-> BioRerank. Built for the Gemma 4 Good Hackathon, May 2026. Open source under Apache 2.0. Try the live demo, read the paper, run the code — links below.
+> SessionRerank+. Built for the Gemma 4 Good Hackathon, May 2026. Open source under Apache 2.0. Try the live demo, read the paper, run the code — links below.
 
 **End card:**
-- 🐝 **github.com/joyjeni/session-aware-toolbench-rerank**
-- 🚜 **biorerank-karnataka.hf.space** *(or your Vercel URL)*
+- 🌾 **github.com/joyjeni/session-aware-toolbench-rerank**
+- 🚜 **abigailcreations-karnataka-agri-assistant.hf.space**
 - 📄 **Kaggle Writeup link**
 
 ---
@@ -114,14 +114,14 @@ Switch to the Pheromone Trails tab. Show the τ values being reinforced.
 |---|---|---|
 | 0:00 | field B-roll | iPhone |
 | 0:06 | phone-app swipe | iPhone |
-| 0:20 | ant trail nature clip | Pexels CC-0 |
-| 0:24 | animated trail (2 API icons) | Canva |
+| 0:20 | animated edge (2 API icons) | Canva |
 | 0:55 | repo file tree | screen capture |
 | 1:00 | karnataka_apis.py zoom | screen capture |
+| 1:10 | Gemma 4 badge on live Space | screen capture |
 | 1:20 | Gradio profile setup | screen capture |
 | 1:35 | Gradio turn 1 result | screen capture |
-| 1:50 | Pheromone tab (empty) | screen capture |
+| 1:50 | Co-activation tab (empty) | screen capture |
 | 2:00 | Gradio turn 2 result | screen capture |
-| 2:10 | Pheromone tab (active τ values) | screen capture |
+| 2:10 | Co-activation tab (active w values) | screen capture |
 | 2:20 | impact cards 1-3 | Canva |
 | 2:45 | logo + URLs | Canva |
