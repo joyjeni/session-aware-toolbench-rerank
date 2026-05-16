@@ -48,8 +48,51 @@ def _strip_per_query(o):
     return o
 
 
+class _GemmaCascade:
+    """Cascade wrapper: first_stage top-K → GemmaPromptedReranker rescore.
+
+    Mirrors CrossEncoderReranker — exposes `.name`, `.corpus`, `.score()` so it
+    plugs into the same eval loop without any special-casing.
+    """
+    def __init__(self, first_stage, inner, topk: int = 100, label: str | None = None):
+        self.first = first_stage
+        self.inner = inner
+        self.topk = topk
+        short = inner.model_name.split("/")[-1] if not label else label
+        self.name = label or f"GemmaRerank ({short}) top-{topk}"
+        self._cache: dict = {}
+
+    @property
+    def corpus(self):
+        return getattr(self.first, "corpus", None)
+
+    def score(self, query, candidates=None):
+        if candidates is None:
+            candidates = self.first.corpus
+        n = len(candidates)
+        s1 = self.first.score(query, candidates)
+        if n <= self.topk:
+            top_idx = np.arange(n)
+        else:
+            top_idx = np.argsort(-s1)[: self.topk]
+        cand_top = [candidates[i] for i in top_idx]
+        key = (query, tuple(c.uid for c in cand_top))
+        if key in self._cache:
+            s2 = self._cache[key]
+        else:
+            s2 = self.inner.score(query, cand_top)
+            self._cache[key] = np.asarray(s2, dtype=np.float32)
+        if n <= self.topk:
+            return s2.astype(np.float32)
+        out = np.full(n, -1e9, dtype=np.float32)
+        for j, i in enumerate(top_idx):
+            out[i] = s2[j]
+        return out
+
+
 def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
-                   cooc_prior) -> dict:
+                   cooc_prior, gemma_embed=None, gemma_rerank=None,
+                   gemma_finetuned=None) -> dict:
     """Run a single-seed Stage 1: refit SessionRerank weights + eval all methods."""
     _set_global_seed(seed)
     print(f"\n[run_all] ====== seed={seed} ======")
@@ -72,6 +115,12 @@ def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
     methods = [bm25, dense, trr]
     if cross_enc is not None:
         methods.append(cross_enc)
+    if gemma_embed is not None:
+        methods.append(gemma_embed)
+    if gemma_rerank is not None:
+        methods.append(gemma_rerank)
+    if gemma_finetuned is not None:
+        methods.append(gemma_finetuned)
     methods.append(srr)
 
     seed_result = {"config": {"seed": seed, "weights": weights}, "splits": {}}
@@ -253,12 +302,65 @@ def main():
               f"({time.time()-t_co:.1f}s)")
 
     # ---------------------------------------------------------------
+    # Gemma 4 extensions (load once, reuse across seeds)
+    # ---------------------------------------------------------------
+    gemma_embed = None
+    if args.gemma_embed:
+        from ..baselines.gemma_embed import GemmaEmbedder
+        print(f"[run_all] loading Gemma-Embed: {args.gemma_embed}")
+        gemma_embed = GemmaEmbedder(
+            corpus,
+            model_name=args.gemma_embed,
+            device=args.device,
+            cache_dir=str(cache_dir),
+        )
+        # Free GPU after corpus encoding so the reranker fits alongside.
+        if args.free_embed_after_encode and args.device.startswith("cuda"):
+            try:
+                gemma_embed.model.to("cpu")
+                import torch as _t
+                _t.cuda.empty_cache()
+                print("[run_all] Gemma-Embed moved to CPU after encoding")
+            except Exception as e:
+                print(f"[run_all] could not free Gemma-Embed GPU: {e}")
+
+    gemma_rerank = None
+    if args.gemma_rerank:
+        from ..baselines.gemma_rerank import GemmaPromptedReranker
+        rdev = args.gemma_rerank_device or args.device
+        print(f"[run_all] loading Gemma-Rerank: {args.gemma_rerank} on {rdev}")
+        inner = GemmaPromptedReranker(
+            model_name=args.gemma_rerank,
+            device=rdev,
+            load_in_4bit=args.gemma_4bit,
+        )
+        gemma_rerank = _GemmaCascade(dense, inner, topk=args.rerank_topk)
+
+    gemma_finetuned = None
+    if args.gemma_finetuned:
+        from ..baselines.gemma_rerank import GemmaPromptedReranker
+        rdev = args.gemma_rerank_device or args.device
+        print(f"[run_all] loading Gemma-Finetuned: {args.gemma_finetuned} on {rdev}")
+        inner_ft = GemmaPromptedReranker(
+            model_name=args.gemma_finetuned,
+            device=rdev,
+            load_in_4bit=args.gemma_4bit,
+        )
+        gemma_finetuned = _GemmaCascade(
+            dense, inner_ft, topk=args.rerank_topk,
+            label=f"Gemma 4 finetuned top-{args.rerank_topk}",
+        )
+
+    # ---------------------------------------------------------------
     # Run per-seed evaluations
     # ---------------------------------------------------------------
     per_seed_results: list[dict] = []
     for seed in seeds:
         sr = _eval_one_seed(seed, args, corpus, bm25, dense, trr,
-                            cross_enc, cooc_prior)
+                            cross_enc, cooc_prior,
+                            gemma_embed=gemma_embed,
+                            gemma_rerank=gemma_rerank,
+                            gemma_finetuned=gemma_finetuned)
         per_seed_results.append(sr)
 
     # ---------------------------------------------------------------
