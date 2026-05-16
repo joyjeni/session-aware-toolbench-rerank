@@ -93,7 +93,7 @@ We are working with three Karnataka Krishi Vigyan Kendras (Tumakuru, Mandya, Kol
 
 ## Team
 
-**Abigail Creations** — solopreneur, AI engineer at Kyndryl India, independent agentic-AI researcher, PhD candidate at MS Ramaiah University (Computer Science Engineering). Bengaluru, Karnataka.
+**Abigail Creations** — Agentic-AI researcher,Bengaluru, Karnataka.
 
 ---
 
