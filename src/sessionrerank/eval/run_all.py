@@ -22,6 +22,7 @@ from ..baselines.bm25 import BM25Retriever
 from ..baselines.dense import DenseRetriever
 from ..baselines.toolrerank import ToolRerank
 from ..model.session_rerank import SessionRerank, fit_weights, CooccurrencePrior
+from ..model.pheromone import PheromoneCoocPrior
 from .runner import eval_closed, eval_open, eval_session, paired_significance, KS
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -224,6 +225,16 @@ def main():
                     help="# train sessions to harvest co-occurrence pairs from.")
     ap.add_argument("--cooc-window", type=int, default=3,
                     help="Sliding window size when counting successful pairs.")
+    # ---- Pheromone (ant-colony) prior ----------------------------------
+    ap.add_argument("--pheromone", action="store_true",
+                    help="Use ACO-style pheromone prior instead of static cooc "
+                         "(time-varying τ-deposit + ρ-decay). Nature-inspired.")
+    ap.add_argument("--pheromone-rho", type=float, default=0.02,
+                    help="Cross-session evaporation rate ρ ∈ [0, 1].")
+    ap.add_argument("--pheromone-tau0", type=float, default=1.0,
+                    help="Pheromone deposit τ₀ per successful transition.")
+    ap.add_argument("--pheromone-decay", type=float, default=0.7,
+                    help="In-session decay γ used at score time.")
     ap.add_argument("--cross-encoder", action="store_true", default=True,
                     help="Add cross-encoder reranker baseline (default on).")
     ap.add_argument("--no-cross-encoder", dest="cross_encoder", action="store_false",
@@ -289,17 +300,36 @@ def main():
     # Co-occurrence prior (deterministic harvest → built once)
     cooc_prior = None
     if args.cooc:
-        print(f"[run_all] building co-occurrence prior "
-              f"({args.cooc_sessions} sessions, window={args.cooc_window}) …")
         t_co = time.time()
-        cooc_prior = CooccurrencePrior.from_sessions(
-            iter_train_sessions(max_sessions=args.cooc_sessions),
-            max_sessions=args.cooc_sessions,
-            window=args.cooc_window,
-        )
-        print(f"[run_all] cooc keys={cooc_prior.n_keys()} "
-              f"sessions_seen={cooc_prior.n_sessions_seen} "
-              f"({time.time()-t_co:.1f}s)")
+        if args.pheromone:
+            print(f"[run_all] building PHEROMONE prior "
+                  f"({args.cooc_sessions} sessions, window={args.cooc_window}, "
+                  f"ρ={args.pheromone_rho}, τ₀={args.pheromone_tau0}, "
+                  f"γ={args.pheromone_decay}) …")
+            cooc_prior = PheromoneCoocPrior.from_sessions(
+                iter_train_sessions(max_sessions=args.cooc_sessions),
+                max_sessions=args.cooc_sessions,
+                window=args.cooc_window,
+                rho=args.pheromone_rho,
+                tau0=args.pheromone_tau0,
+                in_session_decay=args.pheromone_decay,
+            )
+            print(f"[run_all] pheromone keys={cooc_prior.n_keys()} "
+                  f"density={cooc_prior.density():.2f} "
+                  f"mass={cooc_prior.total_mass():.1f} "
+                  f"sessions_seen={cooc_prior.n_sessions_seen} "
+                  f"({time.time()-t_co:.1f}s)")
+        else:
+            print(f"[run_all] building co-occurrence prior "
+                  f"({args.cooc_sessions} sessions, window={args.cooc_window}) …")
+            cooc_prior = CooccurrencePrior.from_sessions(
+                iter_train_sessions(max_sessions=args.cooc_sessions),
+                max_sessions=args.cooc_sessions,
+                window=args.cooc_window,
+            )
+            print(f"[run_all] cooc keys={cooc_prior.n_keys()} "
+                  f"sessions_seen={cooc_prior.n_sessions_seen} "
+                  f"({time.time()-t_co:.1f}s)")
 
     # ---------------------------------------------------------------
     # Gemma 4 extensions (load once, reuse across seeds)
