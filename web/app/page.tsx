@@ -22,6 +22,32 @@ type RerankResponse = {
   weights: { w_base: number; w_cat: number; w_sch: number; w_ept: number };
 };
 
+type AgentResponse = {
+  query: string;
+  answer: string;
+  path: "groq" | "openrouter" | "hf" | "offline";
+  path_error: string | null;
+  top_apis: RankedItem[];
+  history_size: number;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  path?: AgentResponse["path"];
+  top_apis?: RankedItem[];
+  pending?: boolean;
+  error?: string;
+};
+
+const PATH_LABEL: Record<AgentResponse["path"], string> = {
+  groq: "Groq · llama-3.1-8b-instant",
+  openrouter: "OpenRouter · llama-3.2-3b (free)",
+  hf: "Hugging Face · zephyr-7b",
+  offline: "Offline template (no LLM key)",
+};
+
 const SPLITS = [
   "G1_instruction",
   "G1_tool",
@@ -107,10 +133,16 @@ export default function Page() {
   const [history, setHistory] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("");
   const [result, setResult] = useState<RerankResponse | null>(null);
+  const [agent, setAgent] = useState<AgentResponse | null>(null);
+  const [agentLoading, setAgentLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [metrics, setMetrics] = useState<any | null>(null);
   const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
   const [stages, setStages] = useState<Record<string, any>>({});
+  const [activeTab, setActiveTab] = useState<"chat" | "answer" | "retrieval">("chat");
+  const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>("");
+  const [chatSending, setChatSending] = useState<boolean>(false);
 
   // Load API sample for the history picker
   useEffect(() => {
@@ -228,25 +260,127 @@ export default function Page() {
     });
   }
 
-  async function runDemo() {
-    setLoading(true);
+  async function sendChat(text?: string) {
+    const content = (text ?? chatInput).trim();
+    if (!content || chatSending) return;
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: "user",
+      content,
+    };
+    const assistantId = `a-${Date.now()}`;
+    const pendingMsg: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      pending: true,
+    };
+    const prior = chat;
+    setChat([...prior, userMsg, pendingMsg]);
+    setChatInput("");
+    setChatSending(true);
+
+    const transcript = [...prior, userMsg].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     try {
-      const res = await fetch("/api/rerank", {
+      const r = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query,
+          query: content,
           history: Array.from(history),
+          chat: transcript.slice(0, -1),
           top_k: 8,
         }),
       });
-      const data = await res.json();
-      setResult(data);
-    } catch (e) {
-      console.error(e);
+      const d: AgentResponse = await r.json();
+      setChat((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                id: assistantId,
+                role: "assistant",
+                content: d.answer || "(empty response)",
+                path: d.path,
+                top_apis: d.top_apis,
+                pending: false,
+              }
+            : m
+        )
+      );
+    } catch (e: any) {
+      setChat((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                id: assistantId,
+                role: "assistant",
+                content:
+                  "The chat endpoint failed to respond. Try again, or use 'Run rerank' below to inspect retrieval directly.",
+                path: "offline",
+                pending: false,
+                error: String(e?.message || e),
+              }
+            : m
+        )
+      );
     } finally {
-      setLoading(false);
+      setChatSending(false);
     }
+  }
+
+  function clearChat() {
+    setChat([]);
+    setChatInput("");
+  }
+
+  async function runDemo() {
+    setLoading(true);
+    setAgentLoading(true);
+    setAgent(null);
+    setActiveTab("answer");
+    const body = JSON.stringify({
+      query,
+      history: Array.from(history),
+      top_k: 8,
+    });
+    // Fire both endpoints in parallel — the agent endpoint reuses the same
+    // ranking logic but additionally synthesizes a natural-language answer.
+    const rerankP = fetch("/api/rerank", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+      .then((r) => r.json())
+      .then((d) => setResult(d))
+      .catch((e) => console.error("rerank:", e))
+      .finally(() => setLoading(false));
+
+    const agentP = fetch("/api/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+      .then((r) => r.json())
+      .then((d) => setAgent(d))
+      .catch((e) => {
+        console.error("agent:", e);
+        setAgent({
+          query,
+          answer:
+            "The agent endpoint failed to respond. The rerank ranking below is still valid.",
+          path: "offline",
+          path_error: String(e),
+          top_apis: [],
+          history_size: history.size,
+        });
+      })
+      .finally(() => setAgentLoading(false));
+
+    await Promise.allSettled([rerankP, agentP]);
   }
 
   // Compute rank-change badges for the session column
@@ -594,12 +728,16 @@ export default function Page() {
 
       {/* Demo */}
       <section className="container section" id="demo">
-        <h2>Live Demo — Baseline vs SessionRerank</h2>
+        <h2>Live Demo — Ask the Agent</h2>
         <p className="body">
-          Enter a query, tick a few APIs the agent has already used in this
-          session, and watch the right column re-rank in response to that
-          history. The serverless endpoint <code>/api/rerank</code> runs the
-          same scoring rule used in the paper.
+          Chat freely with the agent in the <strong>Free chat</strong> tab —
+          follow-up questions are grounded in the top tools surfaced by
+          SessionRerank, with conversation kept in your browser. Use{" "}
+          <strong>Run rerank</strong> below to inspect the baseline-vs-session
+          ranking columns and see <em>which</em> tools fed an answer. The agent
+          endpoint (<code>/api/agent</code>) tries Groq → OpenRouter → HF
+          Inference in order; if no key is configured it falls back to an
+          offline template and labels the path accordingly.
         </p>
 
         <div className="demo-panel">
@@ -656,70 +794,290 @@ export default function Page() {
               {loading ? "Ranking…" : "Run rerank"}
             </button>
           </div>
-
-          {result && (
-            <div className="demo-results">
-              <div className="result-col">
-                <h3>Baseline (Dense, no history)</h3>
-                <ol className="rerank-list">
-                  {result.baseline.map((r) => (
-                    <li key={r.uid}>
-                      <div className="r-head">
-                        <span className="r-rank">#{r.rank}</span>
-                        <span className="r-name">
-                          <strong>{r.tool}</strong> / {r.api}
-                        </span>
-                        <span className="r-score">{r.score.toFixed(3)}</span>
-                      </div>
-                      <div className="r-meta">
-                        <span className="cat">{r.category}</span>
-                        <span className="desc">{r.description}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-
-              <div className="result-col">
-                <h3>
-                  SessionRerank{" "}
-                  <span className="muted small">
-                    · history size {result.history_size}
-                  </span>
-                </h3>
-                <ol className="rerank-list">
-                  {result.session_rerank.map((r) => {
-                    const delta = rankDelta.get(r.uid) ?? 0;
-                    return (
-                      <li key={r.uid}>
-                        <div className="r-head">
-                          <span className="r-rank">#{r.rank}</span>
-                          <span className="r-name">
-                            <strong>{r.tool}</strong> / {r.api}
-                          </span>
-                          {delta > 0 && (
-                            <span className="badge up">▲ {delta}</span>
-                          )}
-                          {delta < 0 && delta > -50 && (
-                            <span className="badge down">▼ {Math.abs(delta)}</span>
-                          )}
-                          {delta >= 50 && (
-                            <span className="badge new">NEW</span>
-                          )}
-                          <span className="r-score">{r.score.toFixed(3)}</span>
-                        </div>
-                        <div className="r-meta">
-                          <span className="cat">{r.category}</span>
-                          <span className="desc">{r.description}</span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
-              </div>
-            </div>
-          )}
         </div>
+
+        <div className="output-panel" aria-live="polite">
+          <div className="output-tabs" role="tablist" aria-label="Demo output">
+            <button
+              role="tab"
+              aria-selected={activeTab === "chat"}
+              className={`output-tab ${activeTab === "chat" ? "active" : ""}`}
+              onClick={() => setActiveTab("chat")}
+            >
+              <span className="tab-icon" aria-hidden="true">💭</span>
+              <span className="tab-label">Free chat</span>
+              {chat.length > 0 && (
+                <span className="tab-count">{chat.filter((m) => m.role === "user").length}</span>
+              )}
+              {chatSending && <span className="tab-spinner" aria-hidden="true" />}
+            </button>
+            <button
+              role="tab"
+              aria-selected={activeTab === "answer"}
+              className={`output-tab ${activeTab === "answer" ? "active" : ""}`}
+              onClick={() => setActiveTab("answer")}
+              disabled={!agent && !agentLoading}
+            >
+              <span className="tab-icon" aria-hidden="true">💬</span>
+              <span className="tab-label">Single-shot answer</span>
+              {agentLoading && <span className="tab-spinner" aria-hidden="true" />}
+            </button>
+            <button
+              role="tab"
+              aria-selected={activeTab === "retrieval"}
+              className={`output-tab ${activeTab === "retrieval" ? "active" : ""}`}
+              onClick={() => setActiveTab("retrieval")}
+              disabled={!result}
+            >
+              <span className="tab-icon" aria-hidden="true">📊</span>
+              <span className="tab-label">Retrieval &amp; re-ranking</span>
+              {result && (
+                <span className="tab-count">{result.session_rerank.length}</span>
+              )}
+            </button>
+          </div>
+
+            {activeTab === "chat" && (
+              <div className="output-pane chat-pane" role="tabpanel">
+                <div className="chat-header">
+                  <div>
+                    <h3 className="chat-title">Conversation</h3>
+                    <p className="chat-sub">
+                      Free-form follow-ups. Each turn is grounded by SessionRerank,
+                      using the history chips above as session context. The
+                      conversation is kept only in your browser.
+                    </p>
+                  </div>
+                  {chat.length > 0 && (
+                    <button
+                      className="link-btn"
+                      onClick={clearChat}
+                      disabled={chatSending}
+                      type="button"
+                    >
+                      Clear chat
+                    </button>
+                  )}
+                </div>
+
+                <div className="chat-log" role="log">
+                  {chat.length === 0 && (
+                    <div className="chat-empty">
+                      <p>
+                        Ask anything — e.g. <em>"I need to translate text then
+                        convert it to speech"</em> or follow up with <em>"now
+                        find a way to publish that audio."</em>
+                      </p>
+                      <div className="chat-suggestions">
+                        {[
+                          "Find a translation API and convert the result to speech",
+                          "What APIs exist for product price tracking?",
+                          "I need image recognition followed by OCR",
+                        ].map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            className="chat-suggestion"
+                            onClick={() => sendChat(s)}
+                            disabled={chatSending}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {chat.map((m) => (
+                    <div key={m.id} className={`chat-msg chat-msg-${m.role}`}>
+                      <div className="chat-bubble">
+                        {m.pending ? (
+                          <div className="chat-typing" aria-label="thinking">
+                            <span /><span /><span />
+                          </div>
+                        ) : (
+                          <div className="chat-body">{m.content}</div>
+                        )}
+                        {!m.pending && m.role === "assistant" && (
+                          <div className="chat-meta">
+                            {m.path && (
+                              <span className={`path-badge path-${m.path}`}>
+                                {PATH_LABEL[m.path]}
+                              </span>
+                            )}
+                            {m.top_apis && m.top_apis.length > 0 && (
+                              <span className="chat-grounded">
+                                grounded in{" "}
+                                <strong>{m.top_apis.length}</strong> top APIs
+                              </span>
+                            )}
+                            {m.error && (
+                              <span className="chat-error">· {m.error}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <form
+                  className="chat-composer"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendChat();
+                  }}
+                >
+                  <textarea
+                    className="chat-input"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Ask a follow-up… (Enter to send, Shift+Enter for newline)"
+                    rows={2}
+                    disabled={chatSending}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendChat();
+                      }
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    className="btn btn-primary chat-send"
+                    disabled={chatSending || !chatInput.trim()}
+                  >
+                    {chatSending ? "…" : "Send"}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {activeTab === "answer" && (agent || agentLoading) && (
+              <div className="output-pane" role="tabpanel">
+                {agent ? (
+                  <div className="answer-card">
+                    <div className="answer-header">
+                      <h3>Agent response</h3>
+                      <span className={`path-badge path-${agent.path}`}>
+                        {PATH_LABEL[agent.path]}
+                      </span>
+                    </div>
+                    <div className="answer-body">{agent.answer}</div>
+                    <div className="answer-meta">
+                      <span>history size: <strong>{agent.history_size}</strong></span>
+                      <span>·</span>
+                      <span>grounded in <strong>{agent.top_apis.length}</strong> top APIs</span>
+                      {!loading && result && (
+                        <>
+                          <span>·</span>
+                          <button
+                            className="link-btn"
+                            onClick={() => setActiveTab("retrieval")}
+                          >
+                            See retrieval details →
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {agent.path === "offline" && (
+                      <div className="agent-error">
+                        No LLM key detected. Set one of{" "}
+                        <code>GROQ_API_KEY</code> (free at console.groq.com),{" "}
+                        <code>OPENROUTER_API_KEY</code> (free models), or{" "}
+                        <code>HF_TOKEN</code> in your Vercel env vars to get a
+                        natural-language answer instead of the template.
+                      </div>
+                    )}
+                    {agent.path_error && agent.path !== "offline" && (
+                      <div className="agent-error">
+                        Prior path failed: {agent.path_error}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="answer-card answer-loading">
+                    <div className="answer-header">
+                      <h3>Agent response</h3>
+                      <span className="muted small">thinking…</span>
+                    </div>
+                    <div className="skeleton-lines" aria-hidden="true">
+                      <span /><span /><span />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === "retrieval" && result && (
+              <div className="output-pane" role="tabpanel">
+                <p className="body small muted" style={{ marginBottom: 14 }}>
+                  Side-by-side comparison of the Dense baseline and SessionRerank
+                  for the same query. Identical retrieval logic as the agent uses
+                  internally — this view exposes <em>which</em> tools fed the answer.
+                </p>
+                <div className="demo-results">
+                  <div className="result-col">
+                    <h3>Baseline (Dense, no history)</h3>
+                    <ol className="rerank-list">
+                      {result.baseline.map((r) => (
+                        <li key={r.uid}>
+                          <div className="r-head">
+                            <span className="r-rank">#{r.rank}</span>
+                            <span className="r-name">
+                              <strong>{r.tool}</strong> / {r.api}
+                            </span>
+                            <span className="r-score">{r.score.toFixed(3)}</span>
+                          </div>
+                          <div className="r-meta">
+                            <span className="cat">{r.category}</span>
+                            <span className="desc">{r.description}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+
+                  <div className="result-col">
+                    <h3>
+                      SessionRerank{" "}
+                      <span className="muted small">
+                        · history size {result.history_size}
+                      </span>
+                    </h3>
+                    <ol className="rerank-list">
+                      {result.session_rerank.map((r) => {
+                        const delta = rankDelta.get(r.uid) ?? 0;
+                        return (
+                          <li key={r.uid}>
+                            <div className="r-head">
+                              <span className="r-rank">#{r.rank}</span>
+                              <span className="r-name">
+                                <strong>{r.tool}</strong> / {r.api}
+                              </span>
+                              {delta > 0 && (
+                                <span className="badge up">▲ {delta}</span>
+                              )}
+                              {delta < 0 && delta > -50 && (
+                                <span className="badge down">▼ {Math.abs(delta)}</span>
+                              )}
+                              {delta >= 50 && (
+                                <span className="badge new">NEW</span>
+                              )}
+                              <span className="r-score">{r.score.toFixed(3)}</span>
+                            </div>
+                            <div className="r-meta">
+                              <span className="cat">{r.category}</span>
+                              <span className="desc">{r.description}</span>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
       </section>
 
       {/* Footer */}
