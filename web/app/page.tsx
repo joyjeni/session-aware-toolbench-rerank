@@ -22,6 +22,22 @@ type RerankResponse = {
   weights: { w_base: number; w_cat: number; w_sch: number; w_ept: number };
 };
 
+type AgentResponse = {
+  query: string;
+  answer: string;
+  path: "groq" | "openrouter" | "hf" | "offline";
+  path_error: string | null;
+  top_apis: RankedItem[];
+  history_size: number;
+};
+
+const PATH_LABEL: Record<AgentResponse["path"], string> = {
+  groq: "Groq · llama-3.1-8b-instant",
+  openrouter: "OpenRouter · llama-3.2-3b (free)",
+  hf: "Hugging Face · zephyr-7b",
+  offline: "Offline template (no LLM key)",
+};
+
 const SPLITS = [
   "G1_instruction",
   "G1_tool",
@@ -107,6 +123,8 @@ export default function Page() {
   const [history, setHistory] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("");
   const [result, setResult] = useState<RerankResponse | null>(null);
+  const [agent, setAgent] = useState<AgentResponse | null>(null);
+  const [agentLoading, setAgentLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [metrics, setMetrics] = useState<any | null>(null);
   const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
@@ -230,23 +248,47 @@ export default function Page() {
 
   async function runDemo() {
     setLoading(true);
-    try {
-      const res = await fetch("/api/rerank", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+    setAgentLoading(true);
+    setAgent(null);
+    const body = JSON.stringify({
+      query,
+      history: Array.from(history),
+      top_k: 8,
+    });
+    // Fire both endpoints in parallel — the agent endpoint reuses the same
+    // ranking logic but additionally synthesizes a natural-language answer.
+    const rerankP = fetch("/api/rerank", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+      .then((r) => r.json())
+      .then((d) => setResult(d))
+      .catch((e) => console.error("rerank:", e))
+      .finally(() => setLoading(false));
+
+    const agentP = fetch("/api/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+      .then((r) => r.json())
+      .then((d) => setAgent(d))
+      .catch((e) => {
+        console.error("agent:", e);
+        setAgent({
           query,
-          history: Array.from(history),
-          top_k: 8,
-        }),
-      });
-      const data = await res.json();
-      setResult(data);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+          answer:
+            "The agent endpoint failed to respond. The rerank ranking below is still valid.",
+          path: "offline",
+          path_error: String(e),
+          top_apis: [],
+          history_size: history.size,
+        });
+      })
+      .finally(() => setAgentLoading(false));
+
+    await Promise.allSettled([rerankP, agentP]);
   }
 
   // Compute rank-change badges for the session column
@@ -594,12 +636,15 @@ export default function Page() {
 
       {/* Demo */}
       <section className="container section" id="demo">
-        <h2>Live Demo — Baseline vs SessionRerank</h2>
+        <h2>Live Demo — Ask the Agent</h2>
         <p className="body">
-          Enter a query, tick a few APIs the agent has already used in this
-          session, and watch the right column re-rank in response to that
-          history. The serverless endpoint <code>/api/rerank</code> runs the
-          same scoring rule used in the paper.
+          Ask a question and the agent responds with a synthesized answer
+          grounded in the top tools surfaced by SessionRerank. Below that, the
+          baseline-vs-session columns let you see <em>which</em> tools fed the
+          answer — and how session history changes the ranking. The agent
+          endpoint (<code>/api/agent</code>) tries Groq → OpenRouter → HF
+          Inference in order; if no key is configured it falls back to an
+          offline template and labels the path accordingly.
         </p>
 
         <div className="demo-panel">
@@ -657,6 +702,47 @@ export default function Page() {
             </button>
           </div>
 
+          {(agentLoading || agent) && (
+            <div className="agent-card" aria-live="polite">
+              <h4>
+                <span>🤖 Agent answer</span>
+                {agentLoading && (
+                  <span className="muted small">· thinking…</span>
+                )}
+              </h4>
+              {agent ? (
+                <>
+                  <div className="agent-body">{agent.answer}</div>
+                  <div className="agent-meta">
+                    <span>
+                      via{" "}
+                      <span className={`path-badge path-${agent.path}`}>
+                        {PATH_LABEL[agent.path]}
+                      </span>
+                    </span>
+                    <span>history size: {agent.history_size}</span>
+                    <span>top APIs: {agent.top_apis.length}</span>
+                  </div>
+                  {agent.path === "offline" && (
+                    <div className="agent-error">
+                      No LLM key detected. Set one of{" "}
+                      <code>GROQ_API_KEY</code> (free at console.groq.com),{" "}
+                      <code>OPENROUTER_API_KEY</code> (free models), or{" "}
+                      <code>HF_TOKEN</code> in your Vercel env vars to get a
+                      natural-language answer instead of the template.
+                    </div>
+                  )}
+                  {agent.path_error && agent.path !== "offline" && (
+                    <div className="agent-error">
+                      Prior path failed: {agent.path_error}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="agent-body muted">Synthesizing answer…</div>
+              )}
+            </div>
+          )}
           {result && (
             <div className="demo-results">
               <div className="result-col">
