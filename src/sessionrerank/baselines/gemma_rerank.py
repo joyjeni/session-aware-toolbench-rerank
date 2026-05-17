@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
+from ..device_utils import resolve_device
 from .gemma_embed import _maybe_patch_tokenizer_config
 
 
@@ -57,6 +58,9 @@ class GemmaPromptedReranker:
         self.model_name = model_name
         short = model_name.split("/")[-1]
         self.name = f"GemmaRerank ({short})"
+        # Resolve device: fall back to CPU if CUDA was asked for but isn't
+        # available in this torch build (Kaggle TPU image, etc).
+        device = resolve_device(device, for_sentence_transformer=True)
         self.device = device
         self.max_length = max_length
         self.batch_size = batch_size

@@ -21,6 +21,7 @@ from ..data.loader import (
 from ..baselines.bm25 import BM25Retriever
 from ..baselines.dense import DenseRetriever
 from ..baselines.toolrerank import ToolRerank
+from ..device_utils import print_runtime_summary, resolve_device
 from ..model.session_rerank import SessionRerank, fit_weights, CooccurrencePrior
 from ..model.pheromone import PheromoneCoocPrior
 from .runner import eval_closed, eval_open, eval_session, paired_significance, KS
@@ -271,7 +272,27 @@ def main():
         seeds = [0]
     print(f"[run_all] seeds={seeds}")
 
-    print(f"[run_all] device={args.device}  encoder={args.encoder}")
+    # ---- Runtime / device safety ----------------------------------------
+    # Print a one-shot summary so the user can confirm Kaggle/Colab picked
+    # up the expected accelerator.
+    print_runtime_summary("[run_all]")
+    # Resolve dense-encoder device first: SentenceTransformer cannot use XLA
+    # and must not receive 'cuda' on a TPU image (Torch+XLA wheel) where
+    # torch.cuda.is_available() is False.
+    dense_device = resolve_device(args.device, for_sentence_transformer=True)
+    # General-purpose device for HF reranker stages (Gemma) — may use cuda if
+    # available; falls back to cpu silently. We do NOT auto-pick xla here.
+    general_device = resolve_device(args.device, for_sentence_transformer=False)
+    if dense_device != args.device:
+        print(f"[run_all] dense-encoder device adjusted: requested "
+              f"{args.device!r} → using {dense_device!r}")
+    if general_device != args.device:
+        print(f"[run_all] reranker device adjusted: requested "
+              f"{args.device!r} → using {general_device!r}")
+    args.device = general_device  # keep downstream args consistent
+
+    print(f"[run_all] device={args.device}  dense_device={dense_device}  "
+          f"encoder={args.encoder}")
     corpus = build_corpus()
     print(f"[run_all] corpus={len(corpus)} APIs")
 
@@ -280,7 +301,7 @@ def main():
 
     t0 = time.time()
     bm25  = BM25Retriever(corpus)
-    dense = DenseRetriever(corpus, model_name=args.encoder, device=args.device,
+    dense = DenseRetriever(corpus, model_name=args.encoder, device=dense_device,
                            cache_dir=str(cache_dir))
     trr   = ToolRerank(dense, beta=0.6)
     print(f"[run_all] retrievers ready in {time.time()-t0:.1f}s")
@@ -294,7 +315,7 @@ def main():
             first_stage=dense,
             model_name=args.cross_encoder_model,
             topk=args.cross_encoder_topk,
-            device=args.device,
+            device=dense_device,
         )
 
     # Co-occurrence prior (deterministic harvest → built once)

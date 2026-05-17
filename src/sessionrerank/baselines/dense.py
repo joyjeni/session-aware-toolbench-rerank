@@ -12,6 +12,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 from ..data.loader import API
+from ..device_utils import resolve_device
 
 
 class DenseRetriever:
@@ -24,8 +25,11 @@ class DenseRetriever:
                  cache_dir: str | None = None):
         self.model_name = model_name
         self.name = f"Dense ({model_name.split('/')[-1]})"
-        self.device = device
-        self.model = SentenceTransformer(model_name, device=device)
+        # SentenceTransformer does not understand "xla"/"tpu"; fall back to CPU
+        # on TPU runtimes. Also fall back if "cuda" was requested but CUDA is
+        # not available.
+        self.device = resolve_device(device, for_sentence_transformer=True)
+        self.model = SentenceTransformer(model_name, device=self.device)
         self.corpus = list(corpus)
         self.uids = [a.uid for a in self.corpus]
         self._uid2idx = {u: i for i, u in enumerate(self.uids)}

@@ -40,6 +40,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
+from ..device_utils import resolve_device
 
 
 def _maybe_patch_tokenizer_config(model_path: str) -> str:
@@ -138,6 +139,12 @@ class GemmaEmbedder:
         self.model_name = model_name
         short = model_name.split("/")[-1]
         self.name = f"Gemma-Embed ({short})"
+        # Resolve device safely: if 'cuda' was asked for but CUDA isn't built
+        # into torch (e.g. Kaggle TPU image), fall back to CPU rather than
+        # crashing inside torch's CUDA backend. We don't auto-pick XLA here:
+        # the encode path uses HF + .to(device), and torch_xla wiring for HF
+        # encoder-only inference is non-trivial.
+        device = resolve_device(device, for_sentence_transformer=True)
         self.device = device
         self.max_length = max_length
         self.batch_size = batch_size

@@ -17,6 +17,7 @@ from typing import Sequence
 import numpy as np
 
 from ..data.loader import API
+from ..device_utils import resolve_device
 
 
 class CrossEncoderReranker:
@@ -37,9 +38,11 @@ class CrossEncoderReranker:
         self.first = first_stage
         self.topk = topk
         self.model_name = model_name
-        self.device = device
+        # CrossEncoder uses the same device rules as DenseRetriever: no XLA, and
+        # silent fallback to CPU when CUDA is requested but unavailable.
+        self.device = resolve_device(device, for_sentence_transformer=True)
         self.batch_size = batch_size
-        self.model = CrossEncoder(model_name, device=device)
+        self.model = CrossEncoder(model_name, device=self.device)
         self.name = f"CrossEncoder ({model_name.split('/')[-1]}) top-{topk}"
         # Cache (query → cand_uids → score) to avoid re-running for the same
         # query under closed/open/session regimes within one process.
