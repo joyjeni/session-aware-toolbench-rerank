@@ -31,6 +31,16 @@ type AgentResponse = {
   history_size: number;
 };
 
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  path?: AgentResponse["path"];
+  top_apis?: RankedItem[];
+  pending?: boolean;
+  error?: string;
+};
+
 const PATH_LABEL: Record<AgentResponse["path"], string> = {
   groq: "Groq · llama-3.1-8b-instant",
   openrouter: "OpenRouter · llama-3.2-3b (free)",
@@ -129,7 +139,10 @@ export default function Page() {
   const [metrics, setMetrics] = useState<any | null>(null);
   const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
   const [stages, setStages] = useState<Record<string, any>>({});
-  const [activeTab, setActiveTab] = useState<"answer" | "retrieval">("answer");
+  const [activeTab, setActiveTab] = useState<"chat" | "answer" | "retrieval">("chat");
+  const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>("");
+  const [chatSending, setChatSending] = useState<boolean>(false);
 
   // Load API sample for the history picker
   useEffect(() => {
@@ -245,6 +258,83 @@ export default function Page() {
       else next.add(uid);
       return next;
     });
+  }
+
+  async function sendChat(text?: string) {
+    const content = (text ?? chatInput).trim();
+    if (!content || chatSending) return;
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: "user",
+      content,
+    };
+    const assistantId = `a-${Date.now()}`;
+    const pendingMsg: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      pending: true,
+    };
+    const prior = chat;
+    setChat([...prior, userMsg, pendingMsg]);
+    setChatInput("");
+    setChatSending(true);
+
+    const transcript = [...prior, userMsg].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    try {
+      const r = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: content,
+          history: Array.from(history),
+          chat: transcript.slice(0, -1),
+          top_k: 8,
+        }),
+      });
+      const d: AgentResponse = await r.json();
+      setChat((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                id: assistantId,
+                role: "assistant",
+                content: d.answer || "(empty response)",
+                path: d.path,
+                top_apis: d.top_apis,
+                pending: false,
+              }
+            : m
+        )
+      );
+    } catch (e: any) {
+      setChat((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                id: assistantId,
+                role: "assistant",
+                content:
+                  "The chat endpoint failed to respond. Try again, or use 'Run rerank' below to inspect retrieval directly.",
+                path: "offline",
+                pending: false,
+                error: String(e?.message || e),
+              }
+            : m
+        )
+      );
+    } finally {
+      setChatSending(false);
+    }
+  }
+
+  function clearChat() {
+    setChat([]);
+    setChatInput("");
   }
 
   async function runDemo() {
@@ -640,10 +730,11 @@ export default function Page() {
       <section className="container section" id="demo">
         <h2>Live Demo — Ask the Agent</h2>
         <p className="body">
-          Ask a question and the agent responds with a synthesized answer
-          grounded in the top tools surfaced by SessionRerank. Below that, the
-          baseline-vs-session columns let you see <em>which</em> tools fed the
-          answer — and how session history changes the ranking. The agent
+          Chat freely with the agent in the <strong>Free chat</strong> tab —
+          follow-up questions are grounded in the top tools surfaced by
+          SessionRerank, with conversation kept in your browser. Use{" "}
+          <strong>Run rerank</strong> below to inspect the baseline-vs-session
+          ranking columns and see <em>which</em> tools fed an answer. The agent
           endpoint (<code>/api/agent</code>) tries Groq → OpenRouter → HF
           Inference in order; if no key is configured it falls back to an
           offline template and labels the path accordingly.
@@ -705,35 +796,163 @@ export default function Page() {
           </div>
         </div>
 
-        {(agentLoading || agent || result) && (
-          <div className="output-panel" aria-live="polite">
-            <div className="output-tabs" role="tablist" aria-label="Demo output">
-              <button
-                role="tab"
-                aria-selected={activeTab === "answer"}
-                className={`output-tab ${activeTab === "answer" ? "active" : ""}`}
-                onClick={() => setActiveTab("answer")}
-              >
-                <span className="tab-icon" aria-hidden="true">💬</span>
-                <span className="tab-label">Agent answer</span>
-                {agentLoading && <span className="tab-spinner" aria-hidden="true" />}
-              </button>
-              <button
-                role="tab"
-                aria-selected={activeTab === "retrieval"}
-                className={`output-tab ${activeTab === "retrieval" ? "active" : ""}`}
-                onClick={() => setActiveTab("retrieval")}
-                disabled={!result}
-              >
-                <span className="tab-icon" aria-hidden="true">📊</span>
-                <span className="tab-label">Retrieval &amp; re-ranking</span>
-                {result && (
-                  <span className="tab-count">{result.session_rerank.length}</span>
-                )}
-              </button>
-            </div>
+        <div className="output-panel" aria-live="polite">
+          <div className="output-tabs" role="tablist" aria-label="Demo output">
+            <button
+              role="tab"
+              aria-selected={activeTab === "chat"}
+              className={`output-tab ${activeTab === "chat" ? "active" : ""}`}
+              onClick={() => setActiveTab("chat")}
+            >
+              <span className="tab-icon" aria-hidden="true">💭</span>
+              <span className="tab-label">Free chat</span>
+              {chat.length > 0 && (
+                <span className="tab-count">{chat.filter((m) => m.role === "user").length}</span>
+              )}
+              {chatSending && <span className="tab-spinner" aria-hidden="true" />}
+            </button>
+            <button
+              role="tab"
+              aria-selected={activeTab === "answer"}
+              className={`output-tab ${activeTab === "answer" ? "active" : ""}`}
+              onClick={() => setActiveTab("answer")}
+              disabled={!agent && !agentLoading}
+            >
+              <span className="tab-icon" aria-hidden="true">💬</span>
+              <span className="tab-label">Single-shot answer</span>
+              {agentLoading && <span className="tab-spinner" aria-hidden="true" />}
+            </button>
+            <button
+              role="tab"
+              aria-selected={activeTab === "retrieval"}
+              className={`output-tab ${activeTab === "retrieval" ? "active" : ""}`}
+              onClick={() => setActiveTab("retrieval")}
+              disabled={!result}
+            >
+              <span className="tab-icon" aria-hidden="true">📊</span>
+              <span className="tab-label">Retrieval &amp; re-ranking</span>
+              {result && (
+                <span className="tab-count">{result.session_rerank.length}</span>
+              )}
+            </button>
+          </div>
 
-            {activeTab === "answer" && (
+            {activeTab === "chat" && (
+              <div className="output-pane chat-pane" role="tabpanel">
+                <div className="chat-header">
+                  <div>
+                    <h3 className="chat-title">Conversation</h3>
+                    <p className="chat-sub">
+                      Free-form follow-ups. Each turn is grounded by SessionRerank,
+                      using the history chips above as session context. The
+                      conversation is kept only in your browser.
+                    </p>
+                  </div>
+                  {chat.length > 0 && (
+                    <button
+                      className="link-btn"
+                      onClick={clearChat}
+                      disabled={chatSending}
+                      type="button"
+                    >
+                      Clear chat
+                    </button>
+                  )}
+                </div>
+
+                <div className="chat-log" role="log">
+                  {chat.length === 0 && (
+                    <div className="chat-empty">
+                      <p>
+                        Ask anything — e.g. <em>"I need to translate text then
+                        convert it to speech"</em> or follow up with <em>"now
+                        find a way to publish that audio."</em>
+                      </p>
+                      <div className="chat-suggestions">
+                        {[
+                          "Find a translation API and convert the result to speech",
+                          "What APIs exist for product price tracking?",
+                          "I need image recognition followed by OCR",
+                        ].map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            className="chat-suggestion"
+                            onClick={() => sendChat(s)}
+                            disabled={chatSending}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {chat.map((m) => (
+                    <div key={m.id} className={`chat-msg chat-msg-${m.role}`}>
+                      <div className="chat-bubble">
+                        {m.pending ? (
+                          <div className="chat-typing" aria-label="thinking">
+                            <span /><span /><span />
+                          </div>
+                        ) : (
+                          <div className="chat-body">{m.content}</div>
+                        )}
+                        {!m.pending && m.role === "assistant" && (
+                          <div className="chat-meta">
+                            {m.path && (
+                              <span className={`path-badge path-${m.path}`}>
+                                {PATH_LABEL[m.path]}
+                              </span>
+                            )}
+                            {m.top_apis && m.top_apis.length > 0 && (
+                              <span className="chat-grounded">
+                                grounded in{" "}
+                                <strong>{m.top_apis.length}</strong> top APIs
+                              </span>
+                            )}
+                            {m.error && (
+                              <span className="chat-error">· {m.error}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <form
+                  className="chat-composer"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendChat();
+                  }}
+                >
+                  <textarea
+                    className="chat-input"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Ask a follow-up… (Enter to send, Shift+Enter for newline)"
+                    rows={2}
+                    disabled={chatSending}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendChat();
+                      }
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    className="btn btn-primary chat-send"
+                    disabled={chatSending || !chatInput.trim()}
+                  >
+                    {chatSending ? "…" : "Send"}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {activeTab === "answer" && (agent || agentLoading) && (
               <div className="output-pane" role="tabpanel">
                 {agent ? (
                   <div className="answer-card">
@@ -859,7 +1078,6 @@ export default function Page() {
               </div>
             )}
           </div>
-        )}
       </section>
 
       {/* Footer */}

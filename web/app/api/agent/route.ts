@@ -37,17 +37,24 @@ function buildSystemPrompt() {
   ].join(" ");
 }
 
-function buildUserPrompt(query: string, top: RankedItem[]) {
+type ChatTurn = { role: "user" | "assistant"; content: string };
+
+function buildUserPrompt(query: string, top: RankedItem[], chat: ChatTurn[]) {
   const lines = top.slice(0, 5).map(
     (r, i) =>
       `${i + 1}. ${r.tool} / ${r.api}  —  category=${r.category}\n   ${r.description.slice(0, 240)}`
   );
-  return `User question:\n${query}\n\nTop-ranked APIs from SessionRerank:\n${lines.join(
+  const transcript = chat
+    .slice(-6)
+    .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content.slice(0, 400)}`)
+    .join("\n");
+  const ctx = transcript ? `Prior conversation (for context only — do not repeat verbatim):\n${transcript}\n\n` : "";
+  return `${ctx}User question:\n${query}\n\nTop-ranked APIs from SessionRerank:\n${lines.join(
     "\n"
   )}\n\nWrite the assistant's answer now.`;
 }
 
-async function callGroq(query: string, top: RankedItem[]): Promise<string> {
+async function callGroq(query: string, top: RankedItem[], chat: ChatTurn[]): Promise<string> {
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -60,7 +67,7 @@ async function callGroq(query: string, top: RankedItem[]): Promise<string> {
       max_tokens: 220,
       messages: [
         { role: "system", content: buildSystemPrompt() },
-        { role: "user", content: buildUserPrompt(query, top) },
+        { role: "user", content: buildUserPrompt(query, top, chat) },
       ],
     }),
   });
@@ -69,7 +76,7 @@ async function callGroq(query: string, top: RankedItem[]): Promise<string> {
   return j.choices?.[0]?.message?.content?.trim() || "";
 }
 
-async function callOpenRouter(query: string, top: RankedItem[]): Promise<string> {
+async function callOpenRouter(query: string, top: RankedItem[], chat: ChatTurn[]): Promise<string> {
   const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -84,7 +91,7 @@ async function callOpenRouter(query: string, top: RankedItem[]): Promise<string>
       max_tokens: 220,
       messages: [
         { role: "system", content: buildSystemPrompt() },
-        { role: "user", content: buildUserPrompt(query, top) },
+        { role: "user", content: buildUserPrompt(query, top, chat) },
       ],
     }),
   });
@@ -93,10 +100,10 @@ async function callOpenRouter(query: string, top: RankedItem[]): Promise<string>
   return j.choices?.[0]?.message?.content?.trim() || "";
 }
 
-async function callHFInference(query: string, top: RankedItem[]): Promise<string> {
+async function callHFInference(query: string, top: RankedItem[], chat: ChatTurn[]): Promise<string> {
   const prompt =
     `<|system|>\n${buildSystemPrompt()}\n` +
-    `<|user|>\n${buildUserPrompt(query, top)}\n<|assistant|>\n`;
+    `<|user|>\n${buildUserPrompt(query, top, chat)}\n<|assistant|>\n`;
   const r = await fetch(
     "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
     {
@@ -144,6 +151,10 @@ export async function POST(req: Request) {
   }
   const query: string = String(body?.query || "").trim();
   const history: string[] = Array.isArray(body?.history) ? body.history : [];
+  const chatRaw: any[] = Array.isArray(body?.chat) ? body.chat : [];
+  const chat: ChatTurn[] = chatRaw
+    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
+    .map((t) => ({ role: t.role as "user" | "assistant", content: String(t.content) }));
   const topK = 5;
 
   if (!query) {
@@ -172,10 +183,10 @@ export async function POST(req: Request) {
   let pathError: string | null = null;
 
   const tryPaths: Array<["groq" | "openrouter" | "hf", () => Promise<string>]> = [];
-  if (process.env.GROQ_API_KEY) tryPaths.push(["groq", () => callGroq(query, top)]);
+  if (process.env.GROQ_API_KEY) tryPaths.push(["groq", () => callGroq(query, top, chat)]);
   if (process.env.OPENROUTER_API_KEY)
-    tryPaths.push(["openrouter", () => callOpenRouter(query, top)]);
-  if (process.env.HF_TOKEN) tryPaths.push(["hf", () => callHFInference(query, top)]);
+    tryPaths.push(["openrouter", () => callOpenRouter(query, top, chat)]);
+  if (process.env.HF_TOKEN) tryPaths.push(["hf", () => callHFInference(query, top, chat)]);
 
   for (const [name, fn] of tryPaths) {
     try {
