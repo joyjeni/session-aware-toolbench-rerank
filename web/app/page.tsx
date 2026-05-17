@@ -129,6 +129,7 @@ export default function Page() {
   const [metrics, setMetrics] = useState<any | null>(null);
   const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
   const [stages, setStages] = useState<Record<string, any>>({});
+  const [activeTab, setActiveTab] = useState<"answer" | "retrieval">("answer");
 
   // Load API sample for the history picker
   useEffect(() => {
@@ -250,6 +251,7 @@ export default function Page() {
     setLoading(true);
     setAgentLoading(true);
     setAgent(null);
+    setActiveTab("answer");
     const body = JSON.stringify({
       query,
       history: Array.from(history),
@@ -701,111 +703,163 @@ export default function Page() {
               {loading ? "Ranking…" : "Run rerank"}
             </button>
           </div>
+        </div>
 
-          {(agentLoading || agent) && (
-            <div className="agent-card" aria-live="polite">
-              <h4>
-                <span>🤖 Agent answer</span>
-                {agentLoading && (
-                  <span className="muted small">· thinking…</span>
+        {(agentLoading || agent || result) && (
+          <div className="output-panel" aria-live="polite">
+            <div className="output-tabs" role="tablist" aria-label="Demo output">
+              <button
+                role="tab"
+                aria-selected={activeTab === "answer"}
+                className={`output-tab ${activeTab === "answer" ? "active" : ""}`}
+                onClick={() => setActiveTab("answer")}
+              >
+                <span className="tab-icon" aria-hidden="true">💬</span>
+                <span className="tab-label">Agent answer</span>
+                {agentLoading && <span className="tab-spinner" aria-hidden="true" />}
+              </button>
+              <button
+                role="tab"
+                aria-selected={activeTab === "retrieval"}
+                className={`output-tab ${activeTab === "retrieval" ? "active" : ""}`}
+                onClick={() => setActiveTab("retrieval")}
+                disabled={!result}
+              >
+                <span className="tab-icon" aria-hidden="true">📊</span>
+                <span className="tab-label">Retrieval &amp; re-ranking</span>
+                {result && (
+                  <span className="tab-count">{result.session_rerank.length}</span>
                 )}
-              </h4>
-              {agent ? (
-                <>
-                  <div className="agent-body">{agent.answer}</div>
-                  <div className="agent-meta">
-                    <span>
-                      via{" "}
+              </button>
+            </div>
+
+            {activeTab === "answer" && (
+              <div className="output-pane" role="tabpanel">
+                {agent ? (
+                  <div className="answer-card">
+                    <div className="answer-header">
+                      <h3>Agent response</h3>
                       <span className={`path-badge path-${agent.path}`}>
                         {PATH_LABEL[agent.path]}
                       </span>
-                    </span>
-                    <span>history size: {agent.history_size}</span>
-                    <span>top APIs: {agent.top_apis.length}</span>
+                    </div>
+                    <div className="answer-body">{agent.answer}</div>
+                    <div className="answer-meta">
+                      <span>history size: <strong>{agent.history_size}</strong></span>
+                      <span>·</span>
+                      <span>grounded in <strong>{agent.top_apis.length}</strong> top APIs</span>
+                      {!loading && result && (
+                        <>
+                          <span>·</span>
+                          <button
+                            className="link-btn"
+                            onClick={() => setActiveTab("retrieval")}
+                          >
+                            See retrieval details →
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {agent.path === "offline" && (
+                      <div className="agent-error">
+                        No LLM key detected. Set one of{" "}
+                        <code>GROQ_API_KEY</code> (free at console.groq.com),{" "}
+                        <code>OPENROUTER_API_KEY</code> (free models), or{" "}
+                        <code>HF_TOKEN</code> in your Vercel env vars to get a
+                        natural-language answer instead of the template.
+                      </div>
+                    )}
+                    {agent.path_error && agent.path !== "offline" && (
+                      <div className="agent-error">
+                        Prior path failed: {agent.path_error}
+                      </div>
+                    )}
                   </div>
-                  {agent.path === "offline" && (
-                    <div className="agent-error">
-                      No LLM key detected. Set one of{" "}
-                      <code>GROQ_API_KEY</code> (free at console.groq.com),{" "}
-                      <code>OPENROUTER_API_KEY</code> (free models), or{" "}
-                      <code>HF_TOKEN</code> in your Vercel env vars to get a
-                      natural-language answer instead of the template.
+                ) : (
+                  <div className="answer-card answer-loading">
+                    <div className="answer-header">
+                      <h3>Agent response</h3>
+                      <span className="muted small">thinking…</span>
                     </div>
-                  )}
-                  {agent.path_error && agent.path !== "offline" && (
-                    <div className="agent-error">
-                      Prior path failed: {agent.path_error}
+                    <div className="skeleton-lines" aria-hidden="true">
+                      <span /><span /><span />
                     </div>
-                  )}
-                </>
-              ) : (
-                <div className="agent-body muted">Synthesizing answer…</div>
-              )}
-            </div>
-          )}
-          {result && (
-            <div className="demo-results">
-              <div className="result-col">
-                <h3>Baseline (Dense, no history)</h3>
-                <ol className="rerank-list">
-                  {result.baseline.map((r) => (
-                    <li key={r.uid}>
-                      <div className="r-head">
-                        <span className="r-rank">#{r.rank}</span>
-                        <span className="r-name">
-                          <strong>{r.tool}</strong> / {r.api}
-                        </span>
-                        <span className="r-score">{r.score.toFixed(3)}</span>
-                      </div>
-                      <div className="r-meta">
-                        <span className="cat">{r.category}</span>
-                        <span className="desc">{r.description}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
+                  </div>
+                )}
               </div>
+            )}
 
-              <div className="result-col">
-                <h3>
-                  SessionRerank{" "}
-                  <span className="muted small">
-                    · history size {result.history_size}
-                  </span>
-                </h3>
-                <ol className="rerank-list">
-                  {result.session_rerank.map((r) => {
-                    const delta = rankDelta.get(r.uid) ?? 0;
-                    return (
-                      <li key={r.uid}>
-                        <div className="r-head">
-                          <span className="r-rank">#{r.rank}</span>
-                          <span className="r-name">
-                            <strong>{r.tool}</strong> / {r.api}
-                          </span>
-                          {delta > 0 && (
-                            <span className="badge up">▲ {delta}</span>
-                          )}
-                          {delta < 0 && delta > -50 && (
-                            <span className="badge down">▼ {Math.abs(delta)}</span>
-                          )}
-                          {delta >= 50 && (
-                            <span className="badge new">NEW</span>
-                          )}
-                          <span className="r-score">{r.score.toFixed(3)}</span>
-                        </div>
-                        <div className="r-meta">
-                          <span className="cat">{r.category}</span>
-                          <span className="desc">{r.description}</span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
+            {activeTab === "retrieval" && result && (
+              <div className="output-pane" role="tabpanel">
+                <p className="body small muted" style={{ marginBottom: 14 }}>
+                  Side-by-side comparison of the Dense baseline and SessionRerank
+                  for the same query. Identical retrieval logic as the agent uses
+                  internally — this view exposes <em>which</em> tools fed the answer.
+                </p>
+                <div className="demo-results">
+                  <div className="result-col">
+                    <h3>Baseline (Dense, no history)</h3>
+                    <ol className="rerank-list">
+                      {result.baseline.map((r) => (
+                        <li key={r.uid}>
+                          <div className="r-head">
+                            <span className="r-rank">#{r.rank}</span>
+                            <span className="r-name">
+                              <strong>{r.tool}</strong> / {r.api}
+                            </span>
+                            <span className="r-score">{r.score.toFixed(3)}</span>
+                          </div>
+                          <div className="r-meta">
+                            <span className="cat">{r.category}</span>
+                            <span className="desc">{r.description}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+
+                  <div className="result-col">
+                    <h3>
+                      SessionRerank{" "}
+                      <span className="muted small">
+                        · history size {result.history_size}
+                      </span>
+                    </h3>
+                    <ol className="rerank-list">
+                      {result.session_rerank.map((r) => {
+                        const delta = rankDelta.get(r.uid) ?? 0;
+                        return (
+                          <li key={r.uid}>
+                            <div className="r-head">
+                              <span className="r-rank">#{r.rank}</span>
+                              <span className="r-name">
+                                <strong>{r.tool}</strong> / {r.api}
+                              </span>
+                              {delta > 0 && (
+                                <span className="badge up">▲ {delta}</span>
+                              )}
+                              {delta < 0 && delta > -50 && (
+                                <span className="badge down">▼ {Math.abs(delta)}</span>
+                              )}
+                              {delta >= 50 && (
+                                <span className="badge new">NEW</span>
+                              )}
+                              <span className="r-score">{r.score.toFixed(3)}</span>
+                            </div>
+                            <div className="r-meta">
+                              <span className="cat">{r.category}</span>
+                              <span className="desc">{r.description}</span>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Footer */}
