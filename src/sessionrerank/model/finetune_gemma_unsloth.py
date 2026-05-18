@@ -141,6 +141,17 @@ def train(
     lora_r: int = 16,
 ):
     """Run Unsloth LoRA fine-tune. Requires unsloth + trl installed in Colab."""
+    # Hard gate: Unsloth requires a CUDA accelerator. Importing it on a
+    # CPU-only or TPU/XLA runtime raises NotImplementedError from
+    # ``unsloth_zoo.device_type.get_device_type``. Bail out early so we never
+    # hit that import.
+    import torch as _torch_guard
+    if not _torch_guard.cuda.is_available():
+        raise RuntimeError(
+            "Stage 3 LoRA fine-tune requires a CUDA GPU; "
+            "torch.cuda.is_available() is False. Skip this stage on CPU/TPU."
+        )
+
     # Imports are local so the rest of the package works on CPU sandboxes
     # without unsloth installed.
     from unsloth import FastLanguageModel
