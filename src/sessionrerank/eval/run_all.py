@@ -407,6 +407,11 @@ def main():
                     help="Mark the Gemma reranker / fine-tuned cascade as "
                          "skipped without running them. Useful to finalise "
                          "metrics after an OOM crash.")
+    ap.add_argument("--skip-gemma-embed", action="store_true",
+                    help="Skip loading the Gemma bi-encoder. Use this when "
+                         "the GEMMA_BIENCODER id/path is invalid or the "
+                         "model would not fit on the GPU; non-Gemma "
+                         "baselines still run.")
     # ---- Resume / incremental checkpointing ----------------------------
     ap.add_argument("--resume", dest="resume", action="store_true", default=True,
                     help="Reuse <out>.partial.json if present (default on).")
@@ -519,18 +524,62 @@ def main():
     # ---------------------------------------------------------------
     # Gemma 4 extensions (load once, reuse across seeds)
     # ---------------------------------------------------------------
+    # Preflight: validate model ids/paths BEFORE loading anything so a bad
+    # default like google/gemma-4-270m doesn't crash the eval halfway in.
+    from ..baselines.gemma_paths import (
+        GemmaModelUnavailable,
+        KNOWN_INVALID_IDS,
+        resolve_gemma_model,
+        _is_local_model_dir,
+    )
+
+    def _preflight_gemma(arg_value: str | None, role: str) -> str | None:
+        """Return a usable model path/id, or None to skip."""
+        if not arg_value:
+            return None
+        if arg_value in KNOWN_INVALID_IDS:
+            print(f"[run_all] {role}={arg_value!r} is known-invalid; "
+                  f"resolving a replacement …")
+            return resolve_gemma_model(
+                role, override=None,
+                allow_public_fallback=False,  # don't silently swap public ids
+                verbose=True,
+            )
+        # Local path that doesn't exist: try to discover something usable.
+        if (os.path.sep in arg_value or arg_value.startswith(("/", "./"))) \
+                and not _is_local_model_dir(arg_value):
+            print(f"[run_all] {role}={arg_value!r} is not a valid local model "
+                  "dir; falling back to discovery …")
+            return resolve_gemma_model(
+                role, override=None, allow_public_fallback=False, verbose=True,
+            )
+        return arg_value
+
     gemma_embed = None
-    if args.gemma_embed:
+    embed_target = None if args.skip_gemma_embed else _preflight_gemma(
+        args.gemma_embed, "biencoder",
+    )
+    if args.gemma_embed and args.skip_gemma_embed:
+        print("[run_all] --skip-gemma-embed: NOT loading Gemma bi-encoder")
+    elif args.gemma_embed and embed_target is None:
+        print(f"[run_all] Gemma bi-encoder {args.gemma_embed!r} unusable; "
+              "skipping Gemma-Embed baseline.")
+    elif embed_target:
         from ..baselines.gemma_embed import GemmaEmbedder
-        print(f"[run_all] loading Gemma-Embed: {args.gemma_embed}")
-        gemma_embed = GemmaEmbedder(
-            corpus,
-            model_name=args.gemma_embed,
-            device=args.device,
-            cache_dir=str(cache_dir),
-        )
+        print(f"[run_all] loading Gemma-Embed: {embed_target}")
+        try:
+            gemma_embed = GemmaEmbedder(
+                corpus,
+                model_name=embed_target,
+                device=args.device,
+                cache_dir=str(cache_dir),
+            )
+        except GemmaModelUnavailable as e:
+            print(f"[run_all] Gemma-Embed skipped: {e}")
+            gemma_embed = None
         # Free GPU after corpus encoding so the reranker fits alongside.
-        if args.free_embed_after_encode and args.device.startswith("cuda"):
+        if gemma_embed is not None and args.free_embed_after_encode \
+                and args.device.startswith("cuda"):
             try:
                 gemma_embed.model.to("cpu")
                 import torch as _t
@@ -540,41 +589,59 @@ def main():
                 print(f"[run_all] could not free Gemma-Embed GPU: {e}")
 
     gemma_rerank = None
-    if args.gemma_rerank and not args.skip_gemma_rerank:
+    rerank_target = None if args.skip_gemma_rerank else _preflight_gemma(
+        args.gemma_rerank, "reranker",
+    )
+    if args.gemma_rerank and args.skip_gemma_rerank:
+        print("[run_all] --skip-gemma-rerank: NOT loading Gemma reranker")
+    elif args.gemma_rerank and rerank_target is None:
+        print(f"[run_all] Gemma reranker {args.gemma_rerank!r} unusable; "
+              "skipping Gemma-Rerank baseline.")
+    elif rerank_target:
         from ..baselines.gemma_rerank import GemmaPromptedReranker
         rdev = args.gemma_rerank_device or args.device
-        print(f"[run_all] loading Gemma-Rerank: {args.gemma_rerank} on {rdev} "
+        print(f"[run_all] loading Gemma-Rerank: {rerank_target} on {rdev} "
               f"(topk={args.gemma_rerank_topk}, batch_size="
               f"{args.gemma_rerank_batch_size or 'default'})")
         rerank_kwargs = dict(
-            model_name=args.gemma_rerank,
+            model_name=rerank_target,
             device=rdev,
             load_in_4bit=args.gemma_4bit,
         )
         if args.gemma_rerank_batch_size is not None:
             rerank_kwargs["batch_size"] = args.gemma_rerank_batch_size
-        inner = GemmaPromptedReranker(**rerank_kwargs)
-        gemma_rerank = _GemmaCascade(dense, inner, topk=args.gemma_rerank_topk)
-    elif args.gemma_rerank and args.skip_gemma_rerank:
-        print("[run_all] --skip-gemma-rerank: NOT loading Gemma reranker")
+        try:
+            inner = GemmaPromptedReranker(**rerank_kwargs)
+            gemma_rerank = _GemmaCascade(dense, inner, topk=args.gemma_rerank_topk)
+        except GemmaModelUnavailable as e:
+            print(f"[run_all] Gemma-Rerank skipped: {e}")
+            gemma_rerank = None
 
     gemma_finetuned = None
     if args.gemma_finetuned and not args.skip_gemma_rerank:
-        from ..baselines.gemma_rerank import GemmaPromptedReranker
-        rdev = args.gemma_rerank_device or args.device
-        print(f"[run_all] loading Gemma-Finetuned: {args.gemma_finetuned} on {rdev}")
-        ft_kwargs = dict(
-            model_name=args.gemma_finetuned,
-            device=rdev,
-            load_in_4bit=args.gemma_4bit,
-        )
-        if args.gemma_rerank_batch_size is not None:
-            ft_kwargs["batch_size"] = args.gemma_rerank_batch_size
-        inner_ft = GemmaPromptedReranker(**ft_kwargs)
-        gemma_finetuned = _GemmaCascade(
-            dense, inner_ft, topk=args.gemma_finetuned_topk,
-            label=f"Gemma 4 finetuned top-{args.gemma_finetuned_topk}",
-        )
+        if not _is_local_model_dir(args.gemma_finetuned):
+            print(f"[run_all] Gemma fine-tuned dir {args.gemma_finetuned!r} "
+                  "is not a valid model directory; skipping fine-tuned cascade.")
+        else:
+            from ..baselines.gemma_rerank import GemmaPromptedReranker
+            rdev = args.gemma_rerank_device or args.device
+            print(f"[run_all] loading Gemma-Finetuned: {args.gemma_finetuned} on {rdev}")
+            ft_kwargs = dict(
+                model_name=args.gemma_finetuned,
+                device=rdev,
+                load_in_4bit=args.gemma_4bit,
+            )
+            if args.gemma_rerank_batch_size is not None:
+                ft_kwargs["batch_size"] = args.gemma_rerank_batch_size
+            try:
+                inner_ft = GemmaPromptedReranker(**ft_kwargs)
+                gemma_finetuned = _GemmaCascade(
+                    dense, inner_ft, topk=args.gemma_finetuned_topk,
+                    label=f"Gemma 4 finetuned top-{args.gemma_finetuned_topk}",
+                )
+            except GemmaModelUnavailable as e:
+                print(f"[run_all] Gemma-Finetuned skipped: {e}")
+                gemma_finetuned = None
     elif args.gemma_finetuned and args.skip_gemma_rerank:
         print("[run_all] --skip-gemma-rerank: NOT loading Gemma fine-tuned cascade")
 

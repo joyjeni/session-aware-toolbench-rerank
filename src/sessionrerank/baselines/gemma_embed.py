@@ -41,6 +41,24 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
 from ..device_utils import resolve_device
+from .gemma_paths import GemmaModelUnavailable, KNOWN_INVALID_IDS
+
+
+def _wrap_load_error(model_name: str, exc: BaseException) -> GemmaModelUnavailable:
+    """Convert HF load errors into a typed Gemma error with useful context."""
+    msg = str(exc)
+    hint = ""
+    if model_name in KNOWN_INVALID_IDS:
+        hint = (" This ID is not published on huggingface.co. "
+                "Point GEMMA_BIENCODER/GEMMA_RERANKER at a local Gemma "
+                "checkpoint or a valid public model (e.g. google/gemma-2-2b).")
+    elif "is not a local folder and is not a valid model identifier" in msg:
+        hint = (" Set GEMMA_BIENCODER / GEMMA_RERANKER to a local model "
+                "directory (containing config.json + tokenizer.*) or a valid "
+                "public HF id; pass HF_TOKEN if the model is gated.")
+    return GemmaModelUnavailable(
+        f"Gemma model {model_name!r} could not be loaded: {msg}{hint}"
+    )
 
 
 def _maybe_patch_tokenizer_config(model_path: str) -> str:
@@ -156,8 +174,18 @@ class GemmaEmbedder:
             torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
+        if model_name in KNOWN_INVALID_IDS:
+            raise GemmaModelUnavailable(
+                f"Gemma model {model_name!r} is a known-invalid public id "
+                "(not published on huggingface.co). Set GEMMA_BIENCODER to a "
+                "local Gemma checkpoint or a valid public id (e.g. "
+                "google/gemma-2-2b)."
+            )
         patched = _maybe_patch_tokenizer_config(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
+        except (OSError, ValueError) as e:
+            raise _wrap_load_error(model_name, e) from e
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         # Gemma 4 e2B is multimodal: AutoModel returns the joint encoder and
@@ -165,15 +193,23 @@ class GemmaEmbedder:
         # AutoModelForCausalLM loads the full causal LM cleanly; .model is the
         # text-only inner Gemma4TextModel we actually want for mean pooling.
         try:
-            causal = AutoModelForCausalLM.from_pretrained(
-                patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
-            )
-            self.model = getattr(causal, "model", causal).to(device)
-        except Exception as e:
-            print(f"[Gemma-Embed] AutoModelForCausalLM failed ({e}); falling back to AutoModel")
-            self.model = AutoModel.from_pretrained(
-                patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
-            ).to(device)
+            try:
+                causal = AutoModelForCausalLM.from_pretrained(
+                    patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+                )
+                self.model = getattr(causal, "model", causal).to(device)
+            except (OSError, ValueError) as e:
+                # OSError = model not found / not gated access; surface as Gemma-typed.
+                if "is not a local folder and is not a valid model identifier" in str(e):
+                    raise _wrap_load_error(model_name, e) from e
+                print(f"[Gemma-Embed] AutoModelForCausalLM failed ({e}); falling back to AutoModel")
+                self.model = AutoModel.from_pretrained(
+                    patched, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+                ).to(device)
+        except GemmaModelUnavailable:
+            raise
+        except Exception as e:  # last resort: any other transformers error
+            raise _wrap_load_error(model_name, e) from e
         self.model.eval()
 
         self.corpus = list(corpus)

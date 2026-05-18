@@ -28,7 +28,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..data.loader import API
 from ..device_utils import resolve_device
-from .gemma_embed import _maybe_patch_tokenizer_config
+from .gemma_embed import _maybe_patch_tokenizer_config, _wrap_load_error
+from .gemma_paths import GemmaModelUnavailable, KNOWN_INVALID_IDS
 
 
 PROMPT_TEMPLATE = (
@@ -70,36 +71,54 @@ class GemmaPromptedReranker:
             torch.float16 if torch_dtype == "auto" and device.startswith("cuda")
             else (torch.float32 if torch_dtype == "auto" else getattr(torch, torch_dtype))
         )
+        if model_name in KNOWN_INVALID_IDS:
+            raise GemmaModelUnavailable(
+                f"Gemma model {model_name!r} is a known-invalid public id "
+                "(not published on huggingface.co). Set GEMMA_RERANKER to a "
+                "local Gemma checkpoint or a valid public id (e.g. "
+                "google/gemma-2-2b-it)."
+            )
         patched = _maybe_patch_tokenizer_config(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
+        original_name = model_name
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(patched, token=hf_token)
+        except (OSError, ValueError) as e:
+            raise _wrap_load_error(original_name, e) from e
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         model_name = patched  # use patched path for AutoModel below
 
         # Auto-enable 4-bit on large (>=1B) Gemma to fit on a single T4 (~14.5 GiB).
-        if load_in_4bit or os.environ.get("GEMMA_RERANK_4BIT") == "1":
-            try:
-                from transformers import BitsAndBytesConfig
-                bnb = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                )
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name, quantization_config=bnb, token=hf_token,
-                    device_map={"": device} if device.startswith("cuda") else None,
-                    low_cpu_mem_usage=True,
-                )
-            except Exception as e:
-                print(f"[GemmaRerank] 4-bit load failed ({e}); falling back to fp16")
+        try:
+            if load_in_4bit or os.environ.get("GEMMA_RERANK_4BIT") == "1":
+                try:
+                    from transformers import BitsAndBytesConfig
+                    bnb = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name, quantization_config=bnb, token=hf_token,
+                        device_map={"": device} if device.startswith("cuda") else None,
+                        low_cpu_mem_usage=True,
+                    )
+                except (OSError, ValueError) as e:
+                    if "is not a local folder and is not a valid model identifier" in str(e):
+                        raise _wrap_load_error(original_name, e) from e
+                    print(f"[GemmaRerank] 4-bit load failed ({e}); falling back to fp16")
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
+                    ).to(device)
+            else:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
                 ).to(device)
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, dtype=dtype, token=hf_token, low_cpu_mem_usage=True,
-            ).to(device)
+        except GemmaModelUnavailable:
+            raise
+        except (OSError, ValueError) as e:
+            raise _wrap_load_error(original_name, e) from e
         self.model.eval()
 
         # Pre-compute YES/NO token IDs. We try a few common encodings.
