@@ -5,11 +5,22 @@ Now supports multi-seed runs for variance estimation and a co-occurrence
 prior + cross-encoder baseline as part of the Stage 1 method list.
 
 Writes results to results/metrics.json (machine-readable) and prints a table.
+
+Resume / incremental checkpointing
+----------------------------------
+After every (seed, split, regime, method) evaluation we flush the live
+``per_seed_results`` list to a sibling ``<out>.partial.json`` file. If that
+file exists when ``run_all`` starts and ``--resume`` is on (the default),
+already-computed entries are reused and skipped. This lets a Kaggle Stage 4
+that OOM'd inside the Gemma reranker resume without recomputing the BM25 /
+Dense / ToolRerank / CrossEncoder / Gemma-Embed baselines that already
+finished. ``--force-rerun`` (or ``--no-resume``) disables this behaviour.
 """
 from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -48,6 +59,58 @@ def _strip_per_query(o):
     if isinstance(o, dict):
         return {k: _strip_per_query(v) for k, v in o.items() if k != "_per_query"}
     return o
+
+
+# --------------------------------------------------------------------------- #
+# Partial / resume checkpointing
+# --------------------------------------------------------------------------- #
+def _partial_path(out_path: str | os.PathLike) -> Path:
+    out_path = Path(out_path)
+    return out_path.with_suffix(out_path.suffix + ".partial") if out_path.suffix \
+        else Path(str(out_path) + ".partial.json")
+
+
+def _load_partial(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:
+        print(f"[run_all] could not parse partial checkpoint {path}: {e}; "
+              "starting fresh")
+        return None
+
+
+def _save_partial(path: Path, per_seed_results: list[dict],
+                  meta: dict | None = None) -> None:
+    payload = {
+        "_schema": "run_all-partial-v1",
+        "_meta": meta or {},
+        "seeds": per_seed_results,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(path)
+
+
+def _is_oom(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in ("OutOfMemoryError",):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg
+
+
+def _free_cuda(tag: str = "") -> None:
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            _t.cuda.empty_cache()
+            _t.cuda.ipc_collect()
+            if tag:
+                print(f"[run_all] cleared CUDA cache ({tag})")
+    except Exception:
+        pass
 
 
 class _GemmaCascade:
@@ -92,14 +155,30 @@ class _GemmaCascade:
         return out
 
 
+def _is_gemma_rerank(m) -> bool:
+    """Return True for Gemma reranker / fine-tuned cascade wrappers."""
+    return isinstance(m, _GemmaCascade) or m.__class__.__name__ == "_GemmaCascade"
+
+
 def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
                    cooc_prior, gemma_embed=None, gemma_rerank=None,
-                   gemma_finetuned=None) -> dict:
-    """Run a single-seed Stage 1: refit SessionRerank weights + eval all methods."""
+                   gemma_finetuned=None,
+                   existing_seed_result: dict | None = None,
+                   save_cb=None) -> dict:
+    """Run a single-seed Stage 1: refit SessionRerank weights + eval all methods.
+
+    If ``existing_seed_result`` is supplied (from a partial checkpoint), each
+    (split, regime, method) entry already present is skipped. After every
+    method we invoke ``save_cb()`` so the partial file on disk stays current.
+    """
     _set_global_seed(seed)
     print(f"\n[run_all] ====== seed={seed} ======")
 
-    # Refit SessionRerank weights for this seed
+    # Refit SessionRerank weights for this seed. We always refit (cheap
+    # relative to Gemma reranker eval) rather than reuse from partial: the
+    # partial JSON doesn't store the _feat_stats payload needed for
+    # SessionRerank z-scoring, so refitting keeps SessionRerank scores
+    # bit-identical across resume/fresh runs.
     sessions_iter = iter_train_sessions(max_sessions=20000)
     weights = fit_weights(
         base_retriever=dense,
@@ -125,43 +204,92 @@ def _eval_one_seed(seed: int, args, corpus, bm25, dense, trr, cross_enc,
         methods.append(gemma_finetuned)
     methods.append(srr)
 
-    seed_result = {"config": {"seed": seed, "weights": weights}, "splits": {}}
+    seed_result = existing_seed_result or {"config": {"seed": seed, "weights": weights},
+                                            "splits": {}}
+    # Always make sure config.weights reflects current weights (resume case
+    # may have stripped feat_stats above).
+    seed_result.setdefault("config", {})
+    seed_result["config"]["seed"] = seed
+    seed_result["config"]["weights"] = weights
+    seed_result.setdefault("splits", {})
+
+    def _flush():
+        if save_cb is not None:
+            try:
+                save_cb()
+            except Exception as e:
+                print(f"[run_all] partial flush failed: {e}")
+
+    def _eval_method(m, regime, qs, *, allow_oom: bool):
+        t1 = time.time()
+        try:
+            if regime == "closed":
+                r = eval_closed(m, qs)
+            elif regime == "open":
+                r = eval_open(m, qs, corpus)
+            else:  # session
+                r = eval_session(m, qs, corpus,
+                                 use_session=isinstance(m, SessionRerank),
+                                 regime="open" if not args.skip_open else "closed")
+            print(f"    {regime:8s} | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
+                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
+            return r
+        except BaseException as e:  # noqa: BLE001 - catch CUDA OOM too
+            if allow_oom and _is_oom(e):
+                print(f"    {regime:8s} | {m.name:48s} | CUDA OOM ({e}); "
+                      "recording error marker and continuing")
+                _free_cuda(tag=f"after OOM {m.name}/{regime}")
+                return {
+                    "_error": "cuda_oom",
+                    "_error_message": str(e)[:500],
+                    "_skipped": True,
+                }
+            raise
+
     for split_name in BENCHMARK_FILES:
         print(f"  --- {split_name} ---")
         qs = load_eval_split(split_name)
-        split_block = {"n_queries": len(qs), "regimes": {}}
+        split_block = seed_result["splits"].setdefault(
+            split_name, {"n_queries": len(qs), "regimes": {}})
+        split_block.setdefault("n_queries", len(qs))
+        split_block.setdefault("regimes", {})
 
-        closed = {}
-        for m in methods:
-            t1 = time.time()
-            r = eval_closed(m, qs)
-            print(f"    closed   | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
-                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-            closed[m.name] = r
-        split_block["regimes"]["closed"] = closed
-
+        regimes_to_run = ["closed"]
         if not args.skip_open:
-            open_r = {}
+            regimes_to_run.append("open")
+        regimes_to_run.append("session")
+
+        for regime in regimes_to_run:
+            block = split_block["regimes"].setdefault(regime, {})
             for m in methods:
-                t1 = time.time()
-                r = eval_open(m, qs, corpus)
-                print(f"    open     | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
-                      f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-                open_r[m.name] = r
-            split_block["regimes"]["open"] = open_r
+                # Skip if already in partial and not marked as an error to retry
+                existing = block.get(m.name)
+                if isinstance(existing, dict) and "NDCG@5" in existing:
+                    print(f"    {regime:8s} | {m.name:48s} | "
+                          f"NDCG@5={existing['NDCG@5']:.3f}  Hit@5={existing['Hit@5']:.3f}"
+                          "   [resume: reused]")
+                    continue
+                # If existing is an error marker, only retry if not skipping gemma
+                if isinstance(existing, dict) and existing.get("_error"):
+                    if args.skip_gemma_rerank and _is_gemma_rerank(m):
+                        print(f"    {regime:8s} | {m.name:48s} | "
+                              "[resume: previously errored, --skip-gemma-rerank set]")
+                        continue
+                    print(f"    {regime:8s} | {m.name:48s} | "
+                          "[resume: retrying after prior error]")
+                if args.skip_gemma_rerank and _is_gemma_rerank(m):
+                    print(f"    {regime:8s} | {m.name:48s} | "
+                          "[--skip-gemma-rerank: marked skipped]")
+                    block[m.name] = {"_error": "skipped",
+                                      "_error_message": "--skip-gemma-rerank",
+                                      "_skipped": True}
+                    _flush()
+                    continue
+                r = _eval_method(m, regime, qs,
+                                 allow_oom=_is_gemma_rerank(m))
+                block[m.name] = r
+                _flush()
 
-        sess = {}
-        for m in methods:
-            t1 = time.time()
-            r = eval_session(m, qs, corpus,
-                             use_session=isinstance(m, SessionRerank),
-                             regime="open" if not args.skip_open else "closed")
-            print(f"    session  | {m.name:48s} | NDCG@5={r['NDCG@5']:.3f}  "
-                  f"Hit@5={r['Hit@5']:.3f}   ({time.time()-t1:.1f}s)")
-            sess[m.name] = r
-        split_block["regimes"]["session"] = sess
-
-        seed_result["splits"][split_name] = split_block
     return seed_result
 
 
@@ -177,9 +305,13 @@ def _aggregate_seeds(per_seed_results: list[dict]) -> dict:
         for regime, mblock in blk["regimes"].items():
             agg["splits"][split_name]["regimes"][regime] = {}
             for method_name, metrics in mblock.items():
+                # Preserve error markers (CUDA OOM, --skip-gemma-rerank) as-is.
+                if isinstance(metrics, dict) and metrics.get("_error"):
+                    agg["splits"][split_name]["regimes"][regime][method_name] = dict(metrics)
+                    continue
                 agg_metrics: dict = {}
                 for metric_name, _ in metrics.items():
-                    if metric_name == "_per_query":
+                    if metric_name == "_per_query" or metric_name.startswith("_"):
                         continue
                     vals: list[float] = []
                     for sr in per_seed_results:
@@ -260,8 +392,40 @@ def main():
                     help="Load Gemma reranker / finetuned base in 4-bit (NF4).")
     ap.add_argument("--free-embed-after-encode", action="store_true", default=True,
                     help="Move Gemma-Embed off GPU after corpus encoding.")
+    ap.add_argument("--gemma-rerank-topk", type=int, default=None,
+                    help="Top-K candidates fed to Gemma reranker. Overrides "
+                         "--rerank-topk for the zero-shot reranker (and the "
+                         "fine-tuned cascade if --gemma-finetuned-topk is unset). "
+                         "Use a smaller value (e.g. 50 or 32) to fit a T4.")
+    ap.add_argument("--gemma-finetuned-topk", type=int, default=None,
+                    help="Top-K for the fine-tuned Gemma cascade. Defaults to "
+                         "--gemma-rerank-topk if set, else --rerank-topk.")
+    ap.add_argument("--gemma-rerank-batch-size", type=int, default=None,
+                    help="Batch size used inside GemmaPromptedReranker.score(). "
+                         "Lower this (e.g. 2 or 1) to recover from CUDA OOM.")
+    ap.add_argument("--skip-gemma-rerank", action="store_true",
+                    help="Mark the Gemma reranker / fine-tuned cascade as "
+                         "skipped without running them. Useful to finalise "
+                         "metrics after an OOM crash.")
+    # ---- Resume / incremental checkpointing ----------------------------
+    ap.add_argument("--resume", dest="resume", action="store_true", default=True,
+                    help="Reuse <out>.partial.json if present (default on).")
+    ap.add_argument("--no-resume", dest="resume", action="store_false",
+                    help="Ignore any existing partial checkpoint.")
+    ap.add_argument("--force-rerun", action="store_true",
+                    help="Delete any existing partial checkpoint AND output file "
+                         "before running (full rerun).")
+    ap.add_argument("--partial-out", default=None,
+                    help="Path to the partial checkpoint JSON. Defaults to "
+                         "'<--out>.partial'.")
     ap.add_argument("--out", default=str(RESULTS / "metrics.json"))
     args = ap.parse_args()
+
+    # Resolve Gemma reranker topk separately from cross-encoder.
+    if args.gemma_rerank_topk is None:
+        args.gemma_rerank_topk = args.rerank_topk
+    if args.gemma_finetuned_topk is None:
+        args.gemma_finetuned_topk = args.gemma_rerank_topk
 
     # Resolve seeds: --seeds supersedes --seed
     if args.seeds:
@@ -376,43 +540,106 @@ def main():
                 print(f"[run_all] could not free Gemma-Embed GPU: {e}")
 
     gemma_rerank = None
-    if args.gemma_rerank:
+    if args.gemma_rerank and not args.skip_gemma_rerank:
         from ..baselines.gemma_rerank import GemmaPromptedReranker
         rdev = args.gemma_rerank_device or args.device
-        print(f"[run_all] loading Gemma-Rerank: {args.gemma_rerank} on {rdev}")
-        inner = GemmaPromptedReranker(
+        print(f"[run_all] loading Gemma-Rerank: {args.gemma_rerank} on {rdev} "
+              f"(topk={args.gemma_rerank_topk}, batch_size="
+              f"{args.gemma_rerank_batch_size or 'default'})")
+        rerank_kwargs = dict(
             model_name=args.gemma_rerank,
             device=rdev,
             load_in_4bit=args.gemma_4bit,
         )
-        gemma_rerank = _GemmaCascade(dense, inner, topk=args.rerank_topk)
+        if args.gemma_rerank_batch_size is not None:
+            rerank_kwargs["batch_size"] = args.gemma_rerank_batch_size
+        inner = GemmaPromptedReranker(**rerank_kwargs)
+        gemma_rerank = _GemmaCascade(dense, inner, topk=args.gemma_rerank_topk)
+    elif args.gemma_rerank and args.skip_gemma_rerank:
+        print("[run_all] --skip-gemma-rerank: NOT loading Gemma reranker")
 
     gemma_finetuned = None
-    if args.gemma_finetuned:
+    if args.gemma_finetuned and not args.skip_gemma_rerank:
         from ..baselines.gemma_rerank import GemmaPromptedReranker
         rdev = args.gemma_rerank_device or args.device
         print(f"[run_all] loading Gemma-Finetuned: {args.gemma_finetuned} on {rdev}")
-        inner_ft = GemmaPromptedReranker(
+        ft_kwargs = dict(
             model_name=args.gemma_finetuned,
             device=rdev,
             load_in_4bit=args.gemma_4bit,
         )
+        if args.gemma_rerank_batch_size is not None:
+            ft_kwargs["batch_size"] = args.gemma_rerank_batch_size
+        inner_ft = GemmaPromptedReranker(**ft_kwargs)
         gemma_finetuned = _GemmaCascade(
-            dense, inner_ft, topk=args.rerank_topk,
-            label=f"Gemma 4 finetuned top-{args.rerank_topk}",
+            dense, inner_ft, topk=args.gemma_finetuned_topk,
+            label=f"Gemma 4 finetuned top-{args.gemma_finetuned_topk}",
         )
+    elif args.gemma_finetuned and args.skip_gemma_rerank:
+        print("[run_all] --skip-gemma-rerank: NOT loading Gemma fine-tuned cascade")
+
+    # ---------------------------------------------------------------
+    # Resume from partial checkpoint
+    # ---------------------------------------------------------------
+    out_path = Path(args.out)
+    partial_path = Path(args.partial_out) if args.partial_out else _partial_path(out_path)
+    if args.force_rerun:
+        for p in (out_path, partial_path):
+            if p.exists():
+                try:
+                    p.unlink()
+                    print(f"[run_all] --force-rerun: removed {p}")
+                except Exception as e:
+                    print(f"[run_all] could not remove {p}: {e}")
+
+    partial_by_seed: dict[int, dict] = {}
+    if args.resume and not args.force_rerun:
+        existing = _load_partial(partial_path)
+        if existing and isinstance(existing.get("seeds"), list):
+            for sr in existing["seeds"]:
+                try:
+                    s = int(sr["config"]["seed"])
+                    partial_by_seed[s] = sr
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if partial_by_seed:
+                print(f"[run_all] resuming from {partial_path} "
+                      f"(seeds={sorted(partial_by_seed)})")
 
     # ---------------------------------------------------------------
     # Run per-seed evaluations
     # ---------------------------------------------------------------
     per_seed_results: list[dict] = []
+    partial_meta = {
+        "out": str(out_path),
+        "seeds": seeds,
+        "encoder": args.encoder,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    def _save_now():
+        _save_partial(partial_path, per_seed_results, meta=partial_meta)
+
     for seed in seeds:
-        sr = _eval_one_seed(seed, args, corpus, bm25, dense, trr,
-                            cross_enc, cooc_prior,
-                            gemma_embed=gemma_embed,
-                            gemma_rerank=gemma_rerank,
-                            gemma_finetuned=gemma_finetuned)
-        per_seed_results.append(sr)
+        existing_sr = partial_by_seed.get(int(seed))
+        # Reserve this seed's slot in per_seed_results BEFORE calling
+        # _eval_one_seed so save_cb sees the in-progress result. If we have
+        # no prior partial for this seed, we still pre-allocate an empty
+        # stub dict that _eval_one_seed will mutate in place.
+        if existing_sr is None:
+            stub = {"config": {"seed": seed}, "splits": {}}
+            per_seed_results.append(stub)
+            existing_sr = stub
+        else:
+            per_seed_results.append(existing_sr)
+        _eval_one_seed(seed, args, corpus, bm25, dense, trr,
+                       cross_enc, cooc_prior,
+                       gemma_embed=gemma_embed,
+                       gemma_rerank=gemma_rerank,
+                       gemma_finetuned=gemma_finetuned,
+                       existing_seed_result=existing_sr,
+                       save_cb=_save_now)
+        _save_now()
 
     # ---------------------------------------------------------------
     # Aggregate (mean ± std across seeds) + write output
@@ -504,6 +731,13 @@ def main():
 
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\n[run_all] wrote {args.out}")
+    # Final write succeeded — keep the partial file alongside as an audit
+    # trail (it includes _per_query) but also rewrite it with the latest
+    # state so a follow-up resume is a no-op.
+    try:
+        _save_partial(partial_path, per_seed_results, meta=partial_meta)
+    except Exception:
+        pass
     print(f"[run_all] total time: {time.time()-t0:.1f}s")
 
 
