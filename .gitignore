@@ -12,3 +12,8 @@ node_modules/
 *.pt
 .DS_Store
 web/tsconfig.tsbuildinfo
+results/
+outputs/
+runs/
+checkpoints/
+*.log
