@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   LabelList,
   Legend,
   Line,
@@ -18,6 +19,7 @@ type ChartRow = {
   model: string;
   Hit1: number;
   NDCG5: number;
+  highlight?: boolean;
 };
 
 type TrendRow = {
@@ -49,9 +51,15 @@ export default function MetricsFigures({ comparisonData, trendData }: Props) {
               <Tooltip formatter={(value: number) => value.toFixed(3)} />
               <Legend />
               <Bar dataKey="Hit1" fill="#0f766e" barSize={24}>
+                {comparisonData.map((entry, index) => (
+                  <Cell key={`cell-hit1-${index}`} fill={entry.highlight ? '#16a34a' : '#0f766e'} />
+                ))}
                 <LabelList dataKey="Hit1" position="top" formatter={(value: number) => value.toFixed(3)} />
               </Bar>
               <Bar dataKey="NDCG5" fill="#2563eb" barSize={24}>
+                {comparisonData.map((entry, index) => (
+                  <Cell key={`cell-ndcg5-${index}`} fill={entry.highlight ? '#16a34a' : '#2563eb'} />
+                ))}
                 <LabelList dataKey="NDCG5" position="top" formatter={(value: number) => value.toFixed(3)} />
               </Bar>
             </BarChart>
