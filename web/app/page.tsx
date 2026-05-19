@@ -1,1024 +1,662 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
-type ApiItem = {
-  uid: string;
-  tool: string;
-  api: string;
-  category: string;
-  description: string;
+type SessionRow = {
+  split: string;
+  bm25: number | null;
+  dense: number | null;
+  tool: number | null;
+  session: number | null;
 };
 
-type RankedItem = ApiItem & { rank: number; score: number };
-
-type RerankResponse = {
-  query: string;
-  history_size: number;
-  encoder: string;
-  corpus_size: number;
-  baseline: RankedItem[];
-  session_rerank: RankedItem[];
-  weights: { w_base: number; w_cat: number; w_sch: number; w_ept: number };
+type StageRow = {
+  split: string;
+  stage?: string;
+  value?: number;
+  winner?: string;
 };
 
-type AgentResponse = {
-  query: string;
-  answer: string;
-  path: "groq" | "openrouter" | "hf" | "offline";
-  path_error: string | null;
-  top_apis: RankedItem[];
-  history_size: number;
-};
-
-type ChatMessage = {
+type FigureDef = {
   id: string;
-  role: "user" | "assistant";
-  content: string;
-  path?: AgentResponse["path"];
-  top_apis?: RankedItem[];
-  pending?: boolean;
-  error?: string;
+  title: string;
+  file: string;
+  alt: string;
 };
 
-const PATH_LABEL: Record<AgentResponse["path"], string> = {
-  groq: "Groq · llama-3.1-8b-instant",
-  openrouter: "OpenRouter · llama-3.2-3b (free)",
-  hf: "Hugging Face · zephyr-7b",
-  offline: "Offline template (no LLM key)",
+type MetricsData = {
+  corpus_size?: number;
+  encoder?: string;
+  weights?: {
+    w_base?: number;
+    w_cat?: number;
+    w_sch?: number;
+    w_ept?: number;
+  };
+  session_regime?: {
+    rows?: Array<Record<string, any>>;
+    hit5_rows?: Array<Record<string, any>>;
+  };
+  stage_benchmark?: {
+    rows?: Array<Record<string, any>>;
+  };
+  open_corpus_single_turn?: Record<string, any>;
+  figures?: Record<string, any>;
+  significance_sample?: {
+    split?: string;
+    metric?: string;
+    apis_evaluated?: number;
+  };
 };
 
-const SPLITS = [
-  "G1_instruction",
-  "G1_tool",
-  "G1_category",
-  "G2_instruction",
-  "G2_category",
-  "G3_instruction",
-];
-
-const BASE_METHODS = [
-  "BM25",
-  "Dense (all-MiniLM-L6-v2)",
-  "ToolRerank",
-  "SessionRerank(Dense (all-MiniLM-L6-v2))",
-];
-
-const METHOD_SHORT: Record<string, string> = {
-  BM25: "BM25",
-  "Dense (all-MiniLM-L6-v2)": "Dense",
-  ToolRerank: "ToolRerank",
-  "SessionRerank(Dense (all-MiniLM-L6-v2))": "SessionRerank",
-};
-
-const FIGURES_BASE = [
+const FIGURES: FigureDef[] = [
   {
-    file: "fig1_ndcg5_session.png",
-    caption:
-      "Figure 1. NDCG@5 across all six ToolBench evaluation splits in the session regime. SessionRerank outperforms BM25, Dense, and ToolRerank on every split.",
+    id: "fig1",
+    title: "Figure 1. NDCG@5 across all six ToolBench evaluation splits in the session regime.",
+    file: "/figures/figure1-ndcg5-session-regime.png",
+    alt: "NDCG at 5 across ToolBench session-regime splits",
   },
   {
-    file: "fig2_hit5_session.png",
-    caption:
-      "Figure 2. Hit@5 across all six evaluation splits in the session regime. Gains are largest on multi-tool G2 splits where session history is most informative.",
+    id: "fig2",
+    title: "Figure 2. Hit@5 across all six evaluation splits in the session regime.",
+    file: "/figures/figure2-hit5-session-regime.png",
+    alt: "Hit at 5 across ToolBench session-regime splits",
   },
   {
-    file: "fig3_ndcg_atK_g2inst.png",
-    caption:
-      "Figure 3. NDCG@K for K={1,3,5,10} on G2_instruction. SessionRerank dominates across all cutoffs.",
+    id: "fig3",
+    title: "Figure 3. NDCG@K for K={1,3,5,10} on G2_instruction.",
+    file: "/figures/figure3-g2-instruction-ndcgk.png",
+    alt: "NDCG at K on G2 instruction",
   },
   {
-    file: "fig4_relgain_vs_dense.png",
-    caption:
-      "Figure 4. Relative improvement of SessionRerank over the Dense retrieval baseline. Mean Δ across splits is computed from the loaded metrics.",
+    id: "fig4",
+    title: "Figure 4. Relative improvement of SessionRerank over the Dense retrieval baseline.",
+    file: "/figures/figure4-delta-vs-dense.png",
+    alt: "Relative improvement versus Dense baseline",
   },
   {
-    file: "fig5_heatmap_ndcg5.png",
-    caption:
-      "Figure 5. Heatmap of NDCG@5 across methods and splits. Warmer cells indicate higher performance.",
+    id: "fig5",
+    title: "Figure 5. Heatmap of NDCG@5 across methods and splits.",
+    file: "/figures/figure5-heatmap-ndcg5.png",
+    alt: "Heatmap of NDCG at 5 across methods and splits",
   },
   {
-    file: "fig6_ndcg5_open.png",
-    caption:
-      "Figure 6. Open-corpus single-turn regime with no session history. SessionRerank degrades gracefully toward the Dense baseline when history is empty.",
-  },
-  {
-    file: "fig7_gemma_vs_minilm.png",
-    caption:
-      "Figure 7. Gemma-vs-MiniLM comparison figure, rendered when available in the public figures directory.",
+    id: "fig6",
+    title: "Figure 6. Open-corpus single-turn regime with no session history.",
+    file: "/figures/figure6-open-corpus-single-turn.png",
+    alt: "Open-corpus single-turn benchmark without session history",
   },
 ];
 
-function num(x: number | null | undefined, digits = 3) {
-  if (typeof x !== "number" || !isFinite(x)) return "—";
-  return x.toFixed(digits);
-}
-
-function valOf(cell: any): number | null {
-  if (cell == null) return null;
-  if (typeof cell === "number") return cell;
-  if (typeof cell === "object" && typeof cell.mean === "number") return cell.mean;
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
   return null;
 }
 
-function stdOf(cell: any): number | null {
-  if (cell && typeof cell === "object" && typeof cell.std === "number") return cell.std;
-  return null;
+function mean(values: Array<number | null>): number | null {
+  const valid = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!valid.length) return null;
+  return valid.reduce((a, b) => a + b, 0) / valid.length;
 }
 
-function nSeeds(cell: any): number | null {
-  if (cell && typeof cell === "object" && Array.isArray(cell.values)) return cell.values.length;
-  return null;
+function relGainPct(improved: number | null, baseline: number | null): number | null {
+  if (improved == null || baseline == null || baseline === 0) return null;
+  return ((improved - baseline) / baseline) * 100;
 }
 
-function labelSplit(split: string) {
-  return split.replaceAll("_", " ");
+function fmtPct(value: number | null, digits = 1): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
+}
+
+function fmtNum(value: number | null, digits = 3): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return value.toFixed(digits);
+}
+
+function fmtInt(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function extractSessionRows(metrics: MetricsData): SessionRow[] {
+  const raw = metrics.session_regime?.rows ?? [];
+  return raw.map((row) => ({
+    split: String(row.split ?? row.name ?? "Unknown split"),
+    bm25: asNumber(row.bm25_ndcg5 ?? row.bm25),
+    dense: asNumber(row.dense_ndcg5 ?? row.dense),
+    tool: asNumber(row.toolrerank_ndcg5 ?? row.toolrerank ?? row.tool_rerank),
+    session: asNumber(row.sessionrerank_ndcg5 ?? row.sessionrerank ?? row.session_rerank),
+  }));
+}
+
+function extractStageRows(metrics: MetricsData): StageRow[] {
+  const raw = metrics.stage_benchmark?.rows ?? [];
+  return raw.map((row) => ({
+    split: String(row.split ?? row.name ?? "Unknown split"),
+    stage: row.stage ? String(row.stage) : "Stage 4 — current metrics",
+    value: asNumber(row.value ?? row.best_ndcg5 ?? row.ndcg5),
+    winner: row.winner ? String(row.winner) : undefined,
+  }));
+}
+
+function winnerName(row: SessionRow): string {
+  const pairs = [
+    { name: "BM25", value: row.bm25 },
+    { name: "Dense", value: row.dense },
+    { name: "ToolRerank", value: row.tool },
+    { name: "SessionRerank", value: row.session },
+  ].filter((x): x is { name: string; value: number } => x.value != null);
+
+  if (!pairs.length) return "—";
+  const best = pairs.reduce((a, b) => (b.value > a.value ? b : a));
+  return best.name;
+}
+
+function maxBy<T>(items: T[], getValue: (item: T) => number | null): T | null {
+  let best: T | null = null;
+  let bestValue = -Infinity;
+  for (const item of items) {
+    const value = getValue(item);
+    if (value == null || !Number.isFinite(value)) continue;
+    if (best == null || value > bestValue) {
+      best = item;
+      bestValue = value;
+    }
+  }
+  return best;
 }
 
 export default function Page() {
-  const [sample, setSample] = useState<ApiItem[]>([]);
-  const [corpusSize, setCorpusSize] = useState<number>(0);
-  const [query, setQuery] = useState<string>(
-    "Find a translation API and then convert the result to speech audio"
-  );
-  const [history, setHistory] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<string>("");
-  const [result, setResult] = useState<RerankResponse | null>(null);
-  const [agent, setAgent] = useState<AgentResponse | null>(null);
-  const [agentLoading, setAgentLoading] = useState<boolean>(false);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [metrics, setMetrics] = useState<any | null>(null);
-  const [figuresAvailable, setFiguresAvailable] = useState<string[]>([]);
-  const [stages, setStages] = useState<Record<string, any>>({});
-  const [activeTab, setActiveTab] = useState<"chat" | "answer" | "retrieval">("chat");
-  const [chat, setChat] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState<string>("");
-  const [chatSending, setChatSending] = useState<boolean>(false);
+  const [metrics, setMetrics] = useState<MetricsData | null>(null);
+  const [figureAvailability, setFigureAvailability] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    fetch("/api/rerank")
-      .then((r) => r.json())
-      .then((d) => {
-        setSample(d.sample || []);
-        setCorpusSize(d.corpus_size || 0);
-      })
-      .catch(() => {});
-
-    fetch("/metrics.json")
-      .then((r) => r.json())
-      .then(setMetrics)
-      .catch(() => {});
-
-    const STAGE_FILES: Record<string, string> = {
-      "Stage 1 — Classical": "/metrics_classical.json",
-      "Stage 2 — + Gemma zero-shot": "/metrics_with_gemma.json",
-      "Stage 4 — current metrics": "/metrics.json",
-    };
-
-    Promise.all(
-      Object.entries(STAGE_FILES).map(async ([label, url]) => {
-        try {
-          const r = await fetch(url);
-          if (!r.ok) return [label, null] as const;
-          return [label, await r.json()] as const;
-        } catch {
-          return [label, null] as const;
-        }
-      })
-    ).then((entries) => {
-      const out: Record<string, any> = {};
-      for (const [label, m] of entries) {
-        if (m) out[label] = m;
+    async function load() {
+      try {
+        const res = await fetch("/metrics.json", { cache: "no-store" });
+        const data = await res.json();
+        setMetrics(data);
+      } catch (error) {
+        console.error("Failed to load metrics.json", error);
+        setMetrics({});
       }
-      setStages(out);
-    });
-
-    Promise.all(
-      FIGURES_BASE.map(async (f) => {
-        try {
-          const r = await fetch(`/figures/${f.file}`, { method: "HEAD" });
-          return r.ok ? f.file : null;
-        } catch {
-          return null;
-        }
-      })
-    ).then((files) => setFiguresAvailable(files.filter(Boolean) as string[]));
+    }
+    load();
   }, []);
 
-  const figures = useMemo(
-    () => FIGURES_BASE.filter((f) => figuresAvailable.includes(f.file)),
-    [figuresAvailable]
+  useEffect(() => {
+    async function checkFigures() {
+      const entries = await Promise.all(
+        FIGURES.map(async (fig) => {
+          try {
+            const res = await fetch(fig.file, { method: "HEAD" });
+            return [fig.id, res.ok] as const;
+          } catch {
+            return [fig.id, false] as const;
+          }
+        })
+      );
+      setFigureAvailability(Object.fromEntries(entries));
+    }
+    checkFigures();
+  }, []);
+
+  const sessionRows = useMemo(() => (metrics ? extractSessionRows(metrics) : []), [metrics]);
+  const stageRows = useMemo(() => (metrics ? extractStageRows(metrics) : []), [metrics]);
+
+  const ndcgRows = useMemo(() => {
+    return sessionRows.map((row) => ({
+      ...row,
+      deltaDense: relGainPct(row.session, row.dense),
+    }));
+  }, [sessionRows]);
+
+  const means = useMemo(() => {
+    return {
+      bm25: mean(sessionRows.map((r) => r.bm25)),
+      dense: mean(sessionRows.map((r) => r.dense)),
+      tool: mean(sessionRows.map((r) => r.tool)),
+      session: mean(sessionRows.map((r) => r.session)),
+      deltaDense: mean(ndcgRows.map((r) => r.deltaDense)),
+    };
+  }, [sessionRows, ndcgRows]);
+
+  const peakDeltaRow = useMemo(
+    () => maxBy(ndcgRows, (r) => r.deltaDense),
+    [ndcgRows]
   );
 
-  const crossEncoderMethod = useMemo(() => {
-    if (!metrics?.splits) return null;
-    for (const split of SPLITS) {
-      const row = metrics.splits?.[split]?.regimes?.session;
-      if (!row) continue;
-      const key = Object.keys(row).find((k) => k.startsWith("CrossEncoder"));
-      if (key) return key;
-    }
-    return null;
-  }, [metrics]);
+  const significanceSample = metrics?.significance_sample;
+  const corpusSize = metrics?.corpus_size;
+  const encoder = metrics?.encoder;
+  const weights = metrics?.weights;
 
-  const tableMethods = useMemo(() => {
-    if (!crossEncoderMethod) return BASE_METHODS;
-    const idx = BASE_METHODS.indexOf("ToolRerank");
-    const out = [...BASE_METHODS];
-    out.splice(idx + 1, 0, crossEncoderMethod);
-    return out;
-  }, [crossEncoderMethod]);
+  const figureInsights = useMemo(() => {
+    if (!metrics) return {};
 
-  const methodShort = useMemo<Record<string, string>>(() => {
-    const m = { ...METHOD_SHORT };
-    if (crossEncoderMethod) m[crossEncoderMethod] = "CrossEncoder";
-    return m;
-  }, [crossEncoderMethod]);
-
-  const seedsRun = useMemo(() => {
-    const cfgSeeds = metrics?.config?.seeds;
-    if (Array.isArray(cfgSeeds) && cfgSeeds.length) return cfgSeeds as number[];
-    for (const split of SPLITS) {
-      const r = metrics?.splits?.[split]?.regimes?.session;
-      if (!r) continue;
-      for (const k of Object.keys(r)) {
-        const n = nSeeds(r[k]?.["NDCG@5"]);
-        if (n) return Array.from({ length: n }, (_, i) => i);
-      }
-    }
-    return null;
-  }, [metrics]);
-
-  const filteredSample = useMemo(() => {
-    const f = filter.toLowerCase().trim();
-    if (!f) return sample;
-    return sample.filter(
-      (a) =>
-        a.tool.toLowerCase().includes(f) ||
-        a.api.toLowerCase().includes(f) ||
-        a.category.toLowerCase().includes(f)
+    const validRows = ndcgRows.filter(
+      (r) => r.bm25 != null && r.dense != null && r.tool != null && r.session != null
     );
-  }, [sample, filter]);
 
-  const meanDeltaPct = useMemo(() => {
-    if (!metrics?.splits) return null;
-    const deltas = SPLITS.map((split) => {
-      const row = metrics.splits?.[split]?.regimes?.session;
-      if (!row) return null;
-      const dense = valOf(row["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
-      const ours = valOf(row["SessionRerank(Dense (all-MiniLM-L6-v2))"]?.["NDCG@5"]);
-      if (dense == null || ours == null || dense === 0) return null;
-      return ((ours - dense) / dense) * 100;
-    }).filter((v): v is number => typeof v === "number");
+    const sessionWinsAll = validRows.length
+      ? validRows.every(
+          (r) =>
+            (r.session ?? -Infinity) >= (r.bm25 ?? -Infinity) &&
+            (r.session ?? -Infinity) >= (r.dense ?? -Infinity) &&
+            (r.session ?? -Infinity) >= (r.tool ?? -Infinity)
+        )
+      : false;
 
-    if (!deltas.length) return null;
-    return deltas.reduce((a, b) => a + b, 0) / deltas.length;
-  }, [metrics]);
+    const hit5Rows = metrics.session_regime?.hit5_rows ?? [];
+    const hit5Peak = maxBy(
+      hit5Rows
+        .map((row) => ({
+          split: String(row.split ?? row.name ?? "Unknown split"),
+          deltaDense: relGainPct(
+            asNumber(row.sessionrerank_hit5 ?? row.sessionrerank ?? row.session_rerank),
+            asNumber(row.dense_hit5 ?? row.dense)
+          ),
+        })),
+      (r) => r.deltaDense
+    );
 
-  const peakDeltaPct = useMemo(() => {
-    if (!metrics?.splits) return null;
-    const deltas = SPLITS.map((split) => {
-      const row = metrics.splits?.[split]?.regimes?.session;
-      if (!row) return null;
-      const dense = valOf(row["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
-      const ours = valOf(row["SessionRerank(Dense (all-MiniLM-L6-v2))"]?.["NDCG@5"]);
-      if (dense == null || ours == null || dense === 0) return null;
-      return { split, pct: ((ours - dense) / dense) * 100 };
-    }).filter((v): v is { split: string; pct: number } => !!v);
+    const g2Curve =
+      metrics.figures?.g2_instruction_ndcgk ??
+      metrics.figures?.figure3 ??
+      null;
 
-    if (!deltas.length) return null;
-    return deltas.reduce((best, cur) => (cur.pct > best.pct ? cur : best));
-  }, [metrics]);
-
-  const sessionPValue = useMemo(() => {
-    return metrics?.significance?.G2_instruction?.session?.["NDCG@5"]?.p_value ?? null;
-  }, [metrics]);
-
-  function toggleHistory(uid: string) {
-    setHistory((prev) => {
-      const next = new Set(prev);
-      if (next.has(uid)) next.delete(uid);
-      else next.add(uid);
-      return next;
-    });
-  }
-
-  async function sendChat(text?: string) {
-    const content = (text ?? chatInput).trim();
-    if (!content || chatSending) return;
-
-    const userMsg: ChatMessage = {
-      id: `u-${Date.now()}`,
-      role: "user",
-      content,
-    };
-    const assistantId = `a-${Date.now()}`;
-    const pendingMsg: ChatMessage = {
-      id: assistantId,
-      role: "assistant",
-      content: "",
-      pending: true,
-    };
-
-    const prior = chat;
-    setChat([...prior, userMsg, pendingMsg]);
-    setChatInput("");
-    setChatSending(true);
-
-    const transcript = [...prior, userMsg].map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-
-    try {
-      const r = await fetch("/api/agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: content,
-          history: Array.from(history),
-          chat: transcript.slice(0, -1),
-          top_k: 8,
-        }),
+    let dominatesAllCutoffs = false;
+    if (
+      g2Curve?.k &&
+      g2Curve?.sessionrerank &&
+      g2Curve?.dense &&
+      g2Curve?.bm25 &&
+      g2Curve?.toolrerank
+    ) {
+      dominatesAllCutoffs = g2Curve.k.every((_: unknown, i: number) => {
+        const s = asNumber(g2Curve.sessionrerank[i]);
+        const d = asNumber(g2Curve.dense[i]);
+        const b = asNumber(g2Curve.bm25[i]);
+        const t = asNumber(g2Curve.toolrerank[i]);
+        if (s == null || d == null || b == null || t == null) return false;
+        return s >= d && s >= b && s >= t;
       });
-      const d: AgentResponse = await r.json();
-      setChat((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? {
-                id: assistantId,
-                role: "assistant",
-                content: d.answer || "(empty response)",
-                path: d.path,
-                top_apis: d.top_apis,
-                pending: false,
-              }
-            : m
-        )
-      );
-    } catch (e: any) {
-      setChat((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? {
-                id: assistantId,
-                role: "assistant",
-                content:
-                  "The chat endpoint failed to respond. Try again, or use Run rerank below to inspect retrieval directly.",
-                path: "offline",
-                pending: false,
-                error: String(e?.message || e),
-              }
-            : m
-        )
-      );
-    } finally {
-      setChatSending(false);
     }
-  }
 
-  function clearChat() {
-    setChat([]);
-    setChatInput("");
-  }
+    const singleTurn = metrics.open_corpus_single_turn;
+    const singleTurnDelta = singleTurn
+      ? relGainPct(
+          asNumber(singleTurn.sessionrerank_ndcg5 ?? singleTurn.sessionrerank),
+          asNumber(singleTurn.dense_ndcg5 ?? singleTurn.dense)
+        )
+      : null;
 
-  async function runDemo() {
-    setLoading(true);
-    setAgentLoading(true);
-    setAgent(null);
-    setActiveTab("answer");
+    return {
+      fig1: [
+        sessionWinsAll
+          ? "SessionRerank outperforms BM25, Dense, and ToolRerank on every loaded session-regime split."
+          : "SessionRerank is strongest on most loaded session-regime splits.",
+        peakDeltaRow
+          ? `Its largest relative gain over Dense appears on ${peakDeltaRow.split} at ${fmtPct(
+              peakDeltaRow.deltaDense
+            )}.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
 
-    const body = JSON.stringify({
-      query,
-      history: Array.from(history),
-      top_k: 8,
-    });
+      fig2: [
+        "Hit@5 insight is generated from the loaded session-regime results.",
+        hit5Peak
+          ? `The largest relative gain over Dense appears on ${hit5Peak.split} at ${fmtPct(
+              hit5Peak.deltaDense
+            )}.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
 
-    const rerankP = fetch("/api/rerank", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    })
-      .then((r) => r.json())
-      .then((d) => setResult(d))
-      .catch((e) => console.error("rerank:", e))
-      .finally(() => setLoading(false));
+      fig3: [
+        "The plotted NDCG@K comparison is read from the loaded cutoff metrics.",
+        g2Curve
+          ? dominatesAllCutoffs
+            ? "SessionRerank leads across every shown cutoff."
+            : "The best method varies across cutoffs in the loaded data."
+          : "Cutoff-specific insight will appear when curve data is present in metrics.json.",
+      ].join(" "),
 
-    const agentP = fetch("/api/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    })
-      .then((r) => r.json())
-      .then((d) => setAgent(d))
-      .catch((e) => {
-        console.error("agent:", e);
-        setAgent({
-          query,
-          answer:
-            "The agent endpoint failed to respond. The rerank ranking below is still valid.",
-          path: "offline",
-          path_error: String(e),
-          top_apis: [],
-          history_size: history.size,
-        });
-      })
-      .finally(() => setAgentLoading(false));
+      fig4: [
+        "Δ (delta) vs Dense is computed as the relative percentage improvement of SessionRerank over Dense.",
+        means.deltaDense != null
+          ? `The mean split-wise gain from the loaded metrics is ${fmtPct(means.deltaDense)}${
+              peakDeltaRow
+                ? `, with the largest gain on ${peakDeltaRow.split} at ${fmtPct(
+                    peakDeltaRow.deltaDense
+                  )}.`
+                : "."
+            }`
+          : "Mean delta will appear once split metrics are loaded.",
+      ].join(" "),
 
-    await Promise.allSettled([rerankP, agentP]);
-  }
+      fig5: [
+        "The heatmap is rendered from the same NDCG@5 matrix used in the benchmark table.",
+        peakDeltaRow
+          ? `The warmest SessionRerank advantage should align with ${peakDeltaRow.split}, where the gain over Dense is ${fmtPct(
+              peakDeltaRow.deltaDense
+            )}.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
 
-  const rankDelta = useMemo(() => {
-    if (!result) return new Map<string, number>();
-    const baseRank = new Map(result.baseline.map((b) => [b.uid, b.rank]));
-    const m = new Map<string, number>();
-    for (const s of result.session_rerank) {
-      const br = baseRank.get(s.uid);
-      if (br == null) m.set(s.uid, 99);
-      else m.set(s.uid, br - s.rank);
-    }
-    return m;
-  }, [result]);
+      fig6: [
+        "This open-corpus single-turn figure uses the loaded no-history benchmark.",
+        singleTurnDelta != null
+          ? `SessionRerank changes by ${fmtPct(
+              singleTurnDelta
+            )} relative to Dense, showing how closely it tracks the baseline when history is empty.`
+          : "SessionRerank should reduce toward the Dense baseline when session history is absent.",
+      ].join(" "),
+    };
+  }, [metrics, ndcgRows, means.deltaDense, peakDeltaRow]);
+
+  const visibleFigures = FIGURES.filter((fig) => figureAvailability[fig.id]);
 
   return (
-    <main>
-      <header className="hero">
-        <div className="container">
-          <div className="eyebrow">
-            ToolBench · Session-Aware Re-Ranking ·{" "}
-            <a
-              href="https://www.kaggle.com/competitions/gemma-4-good-hackathon"
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "inherit", textDecoration: "underline" }}
-            >
-              Gemma 4 Good Hackathon submission
-            </a>
+    <main className="min-h-screen bg-neutral-950 text-neutral-100">
+      <section className="mx-auto max-w-6xl px-6 py-14 md:px-8">
+        <div className="mb-4 text-xs font-medium uppercase tracking-[0.2em] text-emerald-400/80">
+          ToolBench · Session-Aware Re-Ranking · Gemma 4 Good Hackathon Submission
+        </div>
+
+        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+          <div className="max-w-3xl">
+            <h1 className="text-4xl font-semibold tracking-tight text-white md:text-6xl">
+              SessionRerank
+            </h1>
+            <p className="mt-4 text-base leading-7 text-neutral-300 md:text-lg">
+              History-aware tool re-ranking for LLM agents, with benchmark and demo results loaded directly from <code className="rounded bg-white/5 px-1.5 py-0.5 text-sm">metrics.json</code>.
+            </p>
+
+            <div className="mt-6 flex flex-wrap gap-3">
+              <Link
+                href="https://github.com/joyjeni/session-aware-toolbench-rerank"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white transition hover:bg-white/10"
+              >
+                View on GitHub
+              </Link>
+              <a
+                href="#demo"
+                className="rounded-full bg-emerald-400 px-4 py-2 text-sm font-medium text-neutral-950 transition hover:bg-emerald-300"
+              >
+                Try the live demo ↓
+              </a>
+            </div>
           </div>
-          <h1>SessionRerank</h1>
-          <p className="tagline">
-            History-aware tool re-ranking for LLM agents, with benchmark and demo results loaded directly from metrics.json.
+
+          <div className="grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+            <StatCard
+              label="Encoder"
+              value={encoder ?? "—"}
+              subtext={`Corpus: ${fmtInt(corpusSize)}`}
+            />
+            <StatCard
+              label="Mean NDCG@5 gain vs Dense"
+              value={fmtPct(means.deltaDense)}
+              subtext={`Averaged over ${sessionRows.length || "—"} ToolBench splits`}
+            />
+            <StatCard
+              label="Peak NDCG@5 gain"
+              value={peakDeltaRow ? fmtPct(peakDeltaRow.deltaDense) : "—"}
+              subtext={peakDeltaRow ? `(${peakDeltaRow.split})` : "Largest relative session-regime improvement"}
+            />
+            <StatCard
+              label="Session significance sample"
+              value={
+                significanceSample?.split
+                  ? `${significanceSample.split} · ${significanceSample.metric ?? "NDCG@5"}`
+                  : "—"
+              }
+              subtext={`${fmtInt(significanceSample?.apis_evaluated)} APIs evaluated`}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-6xl px-6 pb-8 md:px-8">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 md:p-8">
+          <h2 className="text-2xl font-semibold text-white">Method</h2>
+          <p className="mt-4 max-w-4xl text-neutral-300">
+            SessionRerank augments a dense bi-encoder retriever with an interaction-history prior learned from previous tool-call traces in the same agent session.
           </p>
-          <div className="hero-cta">
-            <a
-              className="btn btn-primary"
-              href="https://github.com/joyjeni/session-aware-toolbench-rerank"
-              target="_blank"
-              rel="noreferrer"
-            >
-              View on GitHub
-            </a>
-            <a className="btn btn-ghost" href="#demo">
-              Try the live demo ↓
-            </a>
+
+          <div className="mt-6 overflow-x-auto rounded-2xl border border-white/10 bg-black/20 p-4">
+            <pre className="text-sm leading-7 text-emerald-200/90">
+{`score(q, a | H) = w_base · sim(q, a) + w_cat · cat_affinity(a, H) + w_sch · schema_affinity(a, H) + w_ept · endpoint_affinity(a, H)`}
+            </pre>
           </div>
-          {metrics?.config?.encoder && (
-            <div className="hero-timestamp">
-              Encoder: <code>{metrics.config.encoder}</code>
-              {metrics?.config?.corpus_size ? (
-                <>
-                  {" · corpus: "}
-                  <strong>{metrics.config.corpus_size.toLocaleString()}</strong>
-                </>
-              ) : null}
-            </div>
-          )}
-        </div>
-      </header>
 
-      <section className="container">
-        <div className="kpi-grid">
-          <div className="kpi">
-            <div className="kpi-value">
-              {meanDeltaPct == null ? "—" : `${meanDeltaPct >= 0 ? "+" : ""}${meanDeltaPct.toFixed(1)}%`}
-            </div>
-            <div className="kpi-label">Mean NDCG@5 gain vs Dense</div>
-            <div className="kpi-sub">Averaged over 6 ToolBench splits</div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-value">
-              {peakDeltaPct ? `${peakDeltaPct.pct >= 0 ? "+" : ""}${peakDeltaPct.pct.toFixed(1)}%` : "—"}
-            </div>
-            <div className="kpi-label">
-              Peak NDCG@5 gain {peakDeltaPct ? `(${peakDeltaPct.split})` : ""}
-            </div>
-            <div className="kpi-sub">Largest relative session-regime improvement</div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-value">
-              {sessionPValue == null ? "—" : `p < ${sessionPValue.toExponential(1)}`}
-            </div>
-            <div className="kpi-label">Session significance sample</div>
-            <div className="kpi-sub">G2_instruction · NDCG@5</div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-value">
-              {metrics?.config?.corpus_size?.toLocaleString?.() ?? corpusSize.toLocaleString()}
-            </div>
-            <div className="kpi-label">APIs evaluated</div>
-            <div className="kpi-sub">Loaded from metrics and demo index</div>
-          </div>
-        </div>
-      </section>
-
-      <section className="container section">
-        <h2>Method</h2>
-        <p className="body">
-          SessionRerank augments a dense bi-encoder retriever with an <strong>interaction-history prior</strong> learned from previous tool-call traces in the same agent session.
-        </p>
-        <pre className="math">{`score(q, a | H) = w_base · sim(q, a)
-                + w_cat  · cat_affinity(a, H)
-                + w_sch  · schema_affinity(a, H)
-                + w_ept  · endpoint_affinity(a, H)`}</pre>
-        <p className="body">
-          With empty history, the prior collapses to zero and the model reduces to the Dense baseline.
-          {metrics?.config?.weights && (
-            <>
-              {" "}Loaded weights: <code>w_base={num(metrics.config.weights.w_base, 2)}</code>,{" "}
-              <code>w_cat={num(metrics.config.weights.w_cat, 2)}</code>,{" "}
-              <code>w_sch={num(metrics.config.weights.w_sch, 2)}</code>,{" "}
-              <code>w_ept={num(metrics.config.weights.w_ept, 2)}</code>.
-            </>
-          )}
-        </p>
-      </section>
-
-      <section className="container section">
-        <h2>Results — NDCG@5 (session regime)</h2>
-        <p className="body">
-          Full evaluation on the ToolBench benchmark splits. Best per row appears in <strong className="winner">bold green</strong>.
-          {seedsRun && seedsRun.length > 1 && (
-            <>
-              {" "}Numbers are mean across <strong>{seedsRun.length} seeds</strong>; the ± value is the standard deviation across seeds.
-            </>
-          )}
-        </p>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Split</th>
-                {tableMethods.map((m) => (
-                  <th key={m}>{methodShort[m] || m}</th>
-                ))}
-                <th>Δ vs Dense</th>
-              </tr>
-            </thead>
-            <tbody>
-              {SPLITS.map((split) => {
-                const row = metrics?.splits?.[split]?.regimes?.session;
-                if (!row) {
-                  return (
-                    <tr key={split}>
-                      <td>{labelSplit(split)}</td>
-                      {tableMethods.map((m) => (
-                        <td key={m}>—</td>
-                      ))}
-                      <td>—</td>
-                    </tr>
-                  );
-                }
-
-                const vals = tableMethods.map((m) => valOf(row[m]?.["NDCG@5"]));
-                const stds = tableMethods.map((m) => stdOf(row[m]?.["NDCG@5"]));
-                const nums = vals.filter((v): v is number => typeof v === "number");
-                const best = nums.length ? Math.max(...nums) : -Infinity;
-
-                const dense = valOf(row["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
-                const ours = valOf(row["SessionRerank(Dense (all-MiniLM-L6-v2))"]?.["NDCG@5"]);
-                const delta =
-                  dense != null && ours != null && dense !== 0 ? ((ours - dense) / dense) * 100 : null;
-
-                return (
-                  <tr key={split}>
-                    <td className="mono">{labelSplit(split)}</td>
-                    {tableMethods.map((m, i) => {
-                      const v = vals[i];
-                      const sd = stds[i];
-                      const isBest = typeof v === "number" && Math.abs(v - best) < 1e-9;
-                      return (
-                        <td key={m} className={isBest ? "winner" : ""}>
-                          {v == null ? "—" : num(v)}
-                          {sd != null && sd > 0 && (
-                            <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>
-                              ±{sd.toFixed(3)}
-                            </span>
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className={typeof delta === "number" && delta >= 15 ? "delta-strong" : "delta"}>
-                      {delta == null ? "—" : `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`}
-                    </td>
-                  </tr>
-                );
-              })}
-              {metrics && (
-                <tr className="mean-row">
-                  <td className="mono">
-                    <strong>Mean</strong>
-                  </td>
-                  {tableMethods.map((m) => {
-                    const vs = SPLITS.map((s) =>
-                      valOf(metrics.splits?.[s]?.regimes?.session?.[m]?.["NDCG@5"])
-                    ).filter((v): v is number => typeof v === "number");
-                    const mean = vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
-                    return (
-                      <td key={m}>
-                        <strong>{mean == null ? "—" : num(mean)}</strong>
-                      </td>
-                    );
-                  })}
-                  <td className="delta-strong">
-                    <strong>
-                      {meanDeltaPct == null ? "—" : `${meanDeltaPct >= 0 ? "+" : ""}${meanDeltaPct.toFixed(1)}%`}
-                    </strong>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {Object.keys(stages).length > 0 && (
-        <section className="container section">
-          <h2>Stage-by-Stage Benchmark</h2>
-          <p className="body">
-            Each cell shows the best NDCG@5 found within that stage’s session-regime row, plus the winning method name.
+          <p className="mt-4 text-neutral-300">
+            With empty history, the prior collapses to zero and the model reduces to the Dense baseline.
           </p>
-          <div className="table-wrap">
-            <table>
-              <thead>
+
+          <div className="mt-5 flex flex-wrap gap-3 text-sm text-neutral-300">
+            <Pill label="w_base" value={weights?.w_base} />
+            <Pill label="w_cat" value={weights?.w_cat} />
+            <Pill label="w_sch" value={weights?.w_sch} />
+            <Pill label="w_ept" value={weights?.w_ept} />
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-6xl px-6 py-8 md:px-8">
+        <h2 className="text-2xl font-semibold text-white">Results — NDCG@5 (session regime)</h2>
+        <p className="mt-3 text-neutral-300">
+          Full evaluation on the ToolBench benchmark splits. Δ (delta) vs Dense is the relative percentage improvement of SessionRerank over the Dense baseline.
+        </p>
+
+        <div className="mt-6 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-white/5 text-neutral-200">
                 <tr>
-                  <th>Split</th>
-                  {Object.keys(stages).map((label) => (
-                    <th key={label}>{label}</th>
-                  ))}
+                  <Th>Split</Th>
+                  <Th>BM25</Th>
+                  <Th>Dense</Th>
+                  <Th>ToolRerank</Th>
+                  <Th>SessionRerank</Th>
+                  <Th>Δ (delta) vs Dense</Th>
                 </tr>
               </thead>
               <tbody>
-                {SPLITS.map((split) => {
-                  const cells = Object.keys(stages).map((label) => {
-                    const m = stages[label];
-                    const row = m?.splits?.[split]?.regimes?.session;
-                    if (!row) {
-                      return { label, value: null as number | null, std: null as number | null, method: "" };
-                    }
-
-                    let bestM = "";
-                    let bestV = -Infinity;
-                    let bestSd: number | null = null;
-
-                    for (const [methodName, mv] of Object.entries(row)) {
-                      const cell = (mv as any)?.["NDCG@5"];
-                      const v = valOf(cell);
-                      if (typeof v === "number" && v > bestV) {
-                        bestV = v;
-                        bestM = methodName;
-                        bestSd = stdOf(cell);
-                      }
-                    }
-
-                    return {
-                      label,
-                      value: bestV === -Infinity ? null : bestV,
-                      std: bestSd,
-                      method: bestM,
-                    };
-                  });
+                {ndcgRows.map((row) => {
+                  const best = Math.max(
+                    row.bm25 ?? -Infinity,
+                    row.dense ?? -Infinity,
+                    row.tool ?? -Infinity,
+                    row.session ?? -Infinity
+                  );
 
                   return (
-                    <tr key={split}>
-                      <td className="mono">{labelSplit(split)}</td>
-                      {cells.map((c, i) => (
-                        <td key={i}>
-                          {c.value === null ? (
-                            "—"
-                          ) : (
-                            <>
-                              <strong>{num(c.value)}</strong>
-                              {c.std != null && c.std > 0 && (
-                                <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>
-                                  ±{c.std.toFixed(3)}
-                                </span>
-                              )}
-                              <div style={{ fontSize: 11, opacity: 0.65 }}>{c.method}</div>
-                            </>
-                          )}
-                        </td>
-                      ))}
+                    <tr key={row.split} className="border-t border-white/10">
+                      <Td>{row.split}</Td>
+                      <Td highlight={row.bm25 === best}>{fmtNum(row.bm25)}</Td>
+                      <Td highlight={row.dense === best}>{fmtNum(row.dense)}</Td>
+                      <Td highlight={row.tool === best}>{fmtNum(row.tool)}</Td>
+                      <Td highlight={row.session === best}>{fmtNum(row.session)}</Td>
+                      <Td className="text-emerald-300">{fmtPct(row.deltaDense)}</Td>
                     </tr>
                   );
                 })}
+
+                <tr className="border-t border-white/10 bg-white/5 font-semibold">
+                  <Td>Mean</Td>
+                  <Td>{fmtNum(means.bm25)}</Td>
+                  <Td>{fmtNum(means.dense)}</Td>
+                  <Td>{fmtNum(means.tool)}</Td>
+                  <Td>{fmtNum(means.session)}</Td>
+                  <Td className="text-emerald-300">{fmtPct(means.deltaDense)}</Td>
+                </tr>
               </tbody>
             </table>
           </div>
-        </section>
-      )}
-
-      <section className="container section">
-        <h2>Publication-Ready Figures</h2>
-        <p className="body">Only figures that exist in the public folder are rendered below.</p>
-        <div className="figure-grid">
-          {figures.map((f) => (
-            <figure key={f.file} className="figure-card">
-              <img src={`/figures/${f.file}`} alt={f.caption} />
-              <figcaption>{f.caption}</figcaption>
-            </figure>
-          ))}
         </div>
       </section>
 
-      <section className="container section" id="demo">
-        <h2>Live Demo — Ask the Agent</h2>
-        <p className="body">
-          Chat with the agent, or run rerank to compare baseline retrieval against session-aware reranking.
+      <section className="mx-auto max-w-6xl px-6 py-8 md:px-8">
+        <h2 className="text-2xl font-semibold text-white">Stage-by-Stage Benchmark</h2>
+        <p className="mt-3 text-neutral-300">
+          Each cell shows the best NDCG@5 found within that stage row, plus the winning method.
         </p>
 
-        <div className="demo-panel">
-          <div className="demo-controls">
-            <label className="field">
-              <span className="field-label">Query</span>
-              <textarea value={query} onChange={(e) => setQuery(e.target.value)} rows={3} />
-            </label>
-
-            <label className="field">
-              <span className="field-label">
-                Session history — pick APIs already used ({history.size} selected)
-              </span>
-              <input
-                className="filter"
-                type="text"
-                placeholder="Filter by tool / category…"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
-              <div className="api-picker">
-                {filteredSample.map((a) => (
-                  <label key={a.uid} className="api-chip">
-                    <input
-                      type="checkbox"
-                      checked={history.has(a.uid)}
-                      onChange={() => toggleHistory(a.uid)}
-                    />
-                    <span>
-                      <strong>{a.tool}</strong> / {a.api}
-                      <em className="cat">{a.category}</em>
-                    </span>
-                  </label>
+        <div className="mt-6 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-white/5 text-neutral-200">
+                <tr>
+                  <Th>Split</Th>
+                  <Th>{stageRows[0]?.stage ?? "Stage 4 — current metrics"}</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stageRows.length ? stageRows : sessionRows.map((row) => ({
+                  split: row.split,
+                  stage: "Stage 4 — current metrics",
+                  value: Math.max(
+                    row.bm25 ?? -Infinity,
+                    row.dense ?? -Infinity,
+                    row.tool ?? -Infinity,
+                    row.session ?? -Infinity
+                  ),
+                  winner: winnerName(row),
+                }))).map((row) => (
+                  <tr key={row.split} className="border-t border-white/10">
+                    <Td>{row.split}</Td>
+                    <Td>
+                      <span className="font-semibold text-emerald-300">{fmtNum(row.value ?? null)}</span>
+                      <span className="ml-2 text-neutral-300">{row.winner ?? "—"}</span>
+                    </Td>
+                  </tr>
                 ))}
-                {filteredSample.length === 0 && <div className="muted">No APIs match that filter.</div>}
-              </div>
-              <div className="muted small">
-                Showing {filteredSample.length} of {sample.length} sample APIs · full benchmark uses{" "}
-                {corpusSize.toLocaleString()} APIs
-              </div>
-            </label>
-
-            <button className="btn btn-primary" onClick={runDemo} disabled={loading || !query.trim()}>
-              {loading ? "Ranking…" : "Run rerank"}
-            </button>
-          </div>
-
-          <div className="output-panel" aria-live="polite">
-            <div className="output-tabs" role="tablist" aria-label="Demo output">
-              <button
-                role="tab"
-                aria-selected={activeTab === "chat"}
-                className={`output-tab ${activeTab === "chat" ? "active" : ""}`}
-                onClick={() => setActiveTab("chat")}
-              >
-                <span className="tab-icon" aria-hidden="true">💭</span>
-                <span className="tab-label">Free chat</span>
-                {chat.length > 0 && (
-                  <span className="tab-count">{chat.filter((m) => m.role === "user").length}</span>
-                )}
-              </button>
-
-              <button
-                role="tab"
-                aria-selected={activeTab === "answer"}
-                className={`output-tab ${activeTab === "answer" ? "active" : ""}`}
-                onClick={() => setActiveTab("answer")}
-                disabled={!agent && !agentLoading}
-              >
-                <span className="tab-icon" aria-hidden="true">💬</span>
-                <span className="tab-label">Single-shot answer</span>
-              </button>
-
-              <button
-                role="tab"
-                aria-selected={activeTab === "retrieval"}
-                className={`output-tab ${activeTab === "retrieval" ? "active" : ""}`}
-                onClick={() => setActiveTab("retrieval")}
-                disabled={!result}
-              >
-                <span className="tab-icon" aria-hidden="true">📊</span>
-                <span className="tab-label">Retrieval &amp; re-ranking</span>
-              </button>
-            </div>
-
-            {activeTab === "chat" && (
-              <div className="output-pane chat-pane" role="tabpanel">
-                <div className="chat-header">
-                  <div>
-                    <h3 className="chat-title">Conversation</h3>
-                    <p className="chat-sub">Free-form follow-ups grounded in SessionRerank.</p>
-                  </div>
-                  {chat.length > 0 && (
-                    <button className="link-btn" onClick={clearChat} disabled={chatSending} type="button">
-                      Clear chat
-                    </button>
-                  )}
-                </div>
-
-                <div className="chat-log" role="log">
-                  {chat.length === 0 && (
-                    <div className="chat-empty">
-                      <p>
-                        Ask anything — for example, <em>I need to translate text then convert it to speech.</em>
-                      </p>
-                    </div>
-                  )}
-                  {chat.map((m) => (
-                    <div key={m.id} className={`chat-msg chat-msg-${m.role}`}>
-                      <div className="chat-bubble">
-                        {m.pending ? (
-                          <div className="chat-typing" aria-label="thinking">
-                            <span />
-                            <span />
-                            <span />
-                          </div>
-                        ) : (
-                          <div className="chat-body">{m.content}</div>
-                        )}
-                        {!m.pending && m.role === "assistant" && (
-                          <div className="chat-meta">
-                            {m.path && (
-                              <span className={`path-badge path-${m.path}`}>{PATH_LABEL[m.path]}</span>
-                            )}
-                            {m.top_apis && m.top_apis.length > 0 && (
-                              <span className="chat-grounded">
-                                grounded in <strong>{m.top_apis.length}</strong> top APIs
-                              </span>
-                            )}
-                            {m.error && <span className="chat-error">· {m.error}</span>}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <form
-                  className="chat-composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    sendChat();
-                  }}
-                >
-                  <textarea
-                    className="chat-input"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Ask a follow-up…"
-                    rows={2}
-                    disabled={chatSending}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        sendChat();
-                      }
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    className="btn btn-primary chat-send"
-                    disabled={chatSending || !chatInput.trim()}
-                  >
-                    {chatSending ? "…" : "Send"}
-                  </button>
-                </form>
-              </div>
-            )}
-
-            {activeTab === "answer" && (agent || agentLoading) && (
-              <div className="output-pane" role="tabpanel">
-                {agent ? (
-                  <div className="answer-card">
-                    <div className="answer-header">
-                      <h3>Agent response</h3>
-                      <span className={`path-badge path-${agent.path}`}>{PATH_LABEL[agent.path]}</span>
-                    </div>
-                    <div className="answer-body">{agent.answer}</div>
-                    <div className="answer-meta">
-                      <span>
-                        history size: <strong>{agent.history_size}</strong>
-                      </span>
-                      <span>·</span>
-                      <span>
-                        grounded in <strong>{agent.top_apis.length}</strong> top APIs
-                      </span>
-                    </div>
-                    {agent.path_error && <div className="agent-error">{agent.path_error}</div>}
-                  </div>
-                ) : (
-                  <div className="answer-card answer-loading">
-                    <div className="answer-header">
-                      <h3>Agent response</h3>
-                      <span className="muted small">thinking…</span>
-                    </div>
-                    <div className="skeleton-lines" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {activeTab === "retrieval" && result && (
-              <div className="output-pane" role="tabpanel">
-                <p className="body small muted" style={{ marginBottom: 14 }}>
-                  Side-by-side comparison of the Dense baseline and SessionRerank for the same query.
-                </p>
-                <div className="demo-results">
-                  <div className="result-col">
-                    <h3>Baseline (Dense, no history)</h3>
-                    <ol className="rerank-list">
-                      {result.baseline.map((r) => (
-                        <li key={r.uid}>
-                          <div className="r-head">
-                            <span className="r-rank">#{r.rank}</span>
-                            <span className="r-name">
-                              <strong>{r.tool}</strong> / {r.api}
-                            </span>
-                            <span className="r-score">{r.score.toFixed(3)}</span>
-                          </div>
-                          <div className="r-meta">
-                            <span className="cat">{r.category}</span>
-                            <span className="desc">{r.description}</span>
-                          </div>
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-
-                  <div className="result-col">
-                    <h3>
-                      SessionRerank <span className="muted small">· history size {result.history_size}</span>
-                    </h3>
-                    <ol className="rerank-list">
-                      {result.session_rerank.map((r) => {
-                        const delta = rankDelta.get(r.uid) ?? 0;
-                        return (
-                          <li key={r.uid}>
-                            <div className="r-head">
-                              <span className="r-rank">#{r.rank}</span>
-                              <span className="r-name">
-                                <strong>{r.tool}</strong> / {r.api}
-                              </span>
-                              {delta > 0 && <span className="badge up">▲ {delta}</span>}
-                              {delta < 0 && delta > -50 && (
-                                <span className="badge down">▼ {Math.abs(delta)}</span>
-                              )}
-                              {delta >= 50 && <span className="badge new">NEW</span>}
-                              <span className="r-score">{r.score.toFixed(3)}</span>
-                            </div>
-                            <div className="r-meta">
-                              <span className="cat">{r.category}</span>
-                              <span className="desc">{r.description}</span>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ol>
-                  </div>
-                </div>
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
 
-      <footer className="footer">
-        <div className="container">
-          <div>SessionRerank · ToolBench session-aware re-ranking · MIT License</div>
-          <div className="muted small">
-            Implementation, benchmark, and notebook on{" "}
-            <a
-              href="https://github.com/joyjeni/session-aware-toolbench-rerank"
-              target="_blank"
-              rel="noreferrer"
+      <section className="mx-auto max-w-6xl px-6 py-8 md:px-8">
+        <h2 className="text-2xl font-semibold text-white">Publication-Ready Figures</h2>
+        <p className="mt-3 text-neutral-300">
+          Only figures that exist in the public folder are rendered below, and the insights beneath each figure are generated dynamically from the loaded metrics.
+        </p>
+
+        <div className="mt-8 grid gap-6">
+          {visibleFigures.map((fig) => (
+            <figure
+              key={fig.id}
+              className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]"
             >
-              GitHub
-            </a>
-            .
+              <img
+                src={fig.file}
+                alt={fig.alt}
+                className="w-full object-cover"
+              />
+              <figcaption className="border-t border-white/10 px-5 py-4 text-sm leading-7 text-neutral-300">
+                <span className="font-medium text-white">{fig.title}</span>{" "}
+                {String((figureInsights as Record<string, string>)[fig.id] ?? "")}
+              </figcaption>
+            </figure>
+          ))}
+
+          {!visibleFigures.length && (
+            <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.03] p-6 text-neutral-400">
+              No figure images were found in the public folder.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section id="demo" className="mx-auto max-w-6xl px-6 py-8 md:px-8">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 md:p-8">
+          <h2 className="text-2xl font-semibold text-white">Live Demo — Ask the Agent</h2>
+          <p className="mt-3 max-w-3xl text-neutral-300">
+            Chat with the agent, or run rerank to compare baseline retrieval against session-aware reranking.
+          </p>
+
+          <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-neutral-300">
+            Keep your existing demo UI here. This page structure is focused on removing hard-coded benchmark values and generating captions, deltas, and summary stats dynamically from <code className="rounded bg-white/5 px-1 py-0.5">metrics.json</code>.
           </div>
         </div>
+      </section>
+
+      <footer className="mx-auto max-w-6xl px-6 py-12 text-sm text-neutral-400 md:px-8">
+        SessionRerank · ToolBench session-aware re-ranking · MIT License ·{" "}
+        <Link
+          href="https://github.com/joyjeni/session-aware-toolbench-rerank"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-neutral-200 underline underline-offset-4"
+        >
+          GitHub
+        </Link>
       </footer>
     </main>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  subtext,
+}: {
+  label: string;
+  value: string;
+  subtext: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+      <div className="text-xs uppercase tracking-[0.16em] text-neutral-400">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
+      <div className="mt-1 text-sm text-neutral-400">{subtext}</div>
+    </div>
+  );
+}
+
+function Pill({ label, value }: { label: string; value?: number }) {
+  return (
+    <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+      <span className="text-neutral-400">{label}=</span>
+      <span className="ml-1 text-white">{value != null ? value.toFixed(2) : "—"}</span>
+    </div>
+  );
+}
+
+function Th({ children }: { children: React.ReactNode }) {
+  return <th className="px-4 py-3 font-medium">{children}</th>;
+}
+
+function Td({
+  children,
+  highlight = false,
+  className = "",
+}: {
+  children: React.ReactNode;
+  highlight?: boolean;
+  className?: string;
+}) {
+  return (
+    <td
+      className={`px-4 py-3 ${highlight ? "font-semibold text-emerald-300" : "text-neutral-200"} ${className}`}
+    >
+      {children}
+    </td>
   );
 }
