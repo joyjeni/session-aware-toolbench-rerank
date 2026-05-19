@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -34,7 +35,7 @@ type Props = {
 export default function MetricsFigures({ comparisonData, trendData }: Props) {
   return (
     <div className="figure-grid">
-      <section className="figure-card">
+      <section className="chart-card">
         <h3>Session regime comparison</h3>
         <p className="body">
           Hit@1 and NDCG@5 for each model in the session regime of the first evaluation split.
@@ -47,14 +48,18 @@ export default function MetricsFigures({ comparisonData, trendData }: Props) {
               <YAxis width={50} tickFormatter={(value) => value.toFixed(2)} />
               <Tooltip formatter={(value: number) => value.toFixed(3)} />
               <Legend />
-              <Bar dataKey="Hit1" fill="#0f766e" />
-              <Bar dataKey="NDCG5" fill="#2563eb" />
+              <Bar dataKey="Hit1" fill="#0f766e" barSize={24}>
+                <LabelList dataKey="Hit1" position="top" formatter={(value: number) => value.toFixed(3)} />
+              </Bar>
+              <Bar dataKey="NDCG5" fill="#2563eb" barSize={24}>
+                <LabelList dataKey="NDCG5" position="top" formatter={(value: number) => value.toFixed(3)} />
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
       </section>
 
-      <section className="figure-card">
+      <section className="chart-card">
         <h3>Session rerank trend</h3>
         <p className="body">
           NDCG@5 over the selected splits for SessionRerank, Dense, and BM25 in the session regime.
@@ -67,9 +72,15 @@ export default function MetricsFigures({ comparisonData, trendData }: Props) {
               <YAxis width={50} tickFormatter={(value) => value.toFixed(2)} />
               <Tooltip formatter={(value: number) => value.toFixed(3)} />
               <Legend />
-              <Line type="monotone" dataKey="SessionRerank" stroke="#0f766e" strokeWidth={3} dot={{ r: 4 }} />
-              <Line type="monotone" dataKey="Dense" stroke="#2563eb" strokeWidth={3} dot={{ r: 4 }} />
-              <Line type="monotone" dataKey="BM25" stroke="#d97706" strokeWidth={3} dot={{ r: 4 }} />
+              <Line type="monotone" dataKey="SessionRerank" stroke="#0f766e" strokeWidth={3} dot={{ r: 4 }}>
+                <LabelList dataKey="SessionRerank" position="top" formatter={(value: number) => value.toFixed(3)} />
+              </Line>
+              <Line type="monotone" dataKey="Dense" stroke="#2563eb" strokeWidth={3} dot={{ r: 4 }}>
+                <LabelList dataKey="Dense" position="top" formatter={(value: number) => value.toFixed(3)} />
+              </Line>
+              <Line type="monotone" dataKey="BM25" stroke="#d97706" strokeWidth={3} dot={{ r: 4 }}>
+                <LabelList dataKey="BM25" position="top" formatter={(value: number) => value.toFixed(3)} />
+              </Line>
             </LineChart>
           </ResponsiveContainer>
         </div>

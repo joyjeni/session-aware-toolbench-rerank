@@ -32,7 +32,7 @@ from ..data.loader import (
 from ..baselines.bm25 import BM25Retriever
 from ..baselines.dense import DenseRetriever
 from ..baselines.toolrerank import ToolRerank
-from ..device_utils import print_runtime_summary, resolve_device
+from ..device_utils import print_runtime_summary, resolve_device, runtime_summary
 from ..model.session_rerank import SessionRerank, fit_weights, CooccurrencePrior
 from ..model.pheromone import PheromoneCoocPrior
 from .runner import eval_closed, eval_open, eval_session, paired_significance, KS
@@ -758,6 +758,7 @@ def main():
             "config": {
                 "encoder": args.encoder,
                 "device": args.device,
+                "runtime": runtime_summary(),
                 "corpus_size": len(corpus),
                 "seeds": seeds,
                 "ks": list(KS),

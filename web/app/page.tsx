@@ -11,10 +11,23 @@ type Split = {
   regimes: Regimes;
 };
 
+type RuntimeInfo = {
+  platform: string;
+  detected: string;
+  cuda_available: boolean;
+  xla_available: boolean;
+  torch_version?: string;
+  torch_cuda_version?: string | null;
+  cuda_device_count?: number;
+  cuda_device_names?: string[];
+  torch_error?: string;
+};
+
 type MetricsFile = {
   config: {
     encoder: string;
     device: string;
+    runtime?: RuntimeInfo;
     corpus_size: number;
     weights: Record<string, number>;
     ks: number[];
@@ -55,6 +68,25 @@ function formatLabel(value: string) {
 function formatValue(value: number) {
   if (Number.isInteger(value)) return value.toString();
   return value.toFixed(3);
+}
+
+function formatRuntimeSummary(metrics: MetricsFile) {
+  const runtime = metrics.config.runtime;
+  if (!runtime) {
+    return {
+      platform: 'Unknown',
+      device: metrics.config.device,
+      detail: 'Runtime metadata not yet available in this metrics export.',
+    };
+  }
+
+  const gpuNames = runtime.cuda_device_names?.join(', ') || 'n/a';
+  return {
+    platform: runtime.platform,
+    device: runtime.detected,
+    detail: `${runtime.cuda_available ? 'CUDA available' : 'CUDA unavailable'} · ${runtime.xla_available ? 'XLA available' : 'XLA unavailable'} · ${gpuNames}`,
+    torch: runtime.torch_version ? `PyTorch ${runtime.torch_version}` : undefined,
+  };
 }
 
 async function loadMetrics(): Promise<MetricsFile> {
@@ -243,6 +275,7 @@ function getInsightCards(metrics: MetricsFile, highlights: ReturnType<typeof ext
 
 export default async function Page() {
   const metrics = await loadMetrics();
+  const runtimeInfo = formatRuntimeSummary(metrics);
   const allBestModels = splitOrder
     .filter((name) => name in metrics.splits)
     .flatMap((name) => getBestModels(name, metrics.splits[name]));
@@ -265,6 +298,9 @@ export default async function Page() {
           <p className="hero-timestamp">
             Encoder: <code>{metrics.config.encoder}</code> · Device: <code>{metrics.config.device}</code> · Corpus size: <code>{metrics.config.corpus_size.toLocaleString()}</code>
           </p>
+          <p className="hero-timestamp">
+            Runtime: <code>{metrics.config.runtime?.platform ?? 'Unknown'}</code> · Detected device: <code>{metrics.config.runtime?.detected ?? metrics.config.device}</code>
+          </p>
         </div>
       </section>
 
@@ -275,22 +311,24 @@ export default async function Page() {
           The chart panel below is generated dynamically from the loaded values.
         </p>
 
-        <div style={{ display: 'grid', gap: 18, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-          <div className="figure-card">
+        <div className="stat-section">
+          <div className="stat-card">
             <p className="kpi-label">Corpus size</p>
             <p className="kpi-value">{metrics.config.corpus_size.toLocaleString()}</p>
           </div>
-          <div className="figure-card">
+          <div className="stat-card">
             <p className="kpi-label">Encoder</p>
             <p className="kpi-value">{metrics.config.encoder}</p>
           </div>
-          <div className="figure-card">
-            <p className="kpi-label">Device</p>
+          <div className="stat-card">
+            <p className="kpi-label">Configured device</p>
             <p className="kpi-value">{metrics.config.device}</p>
           </div>
-          <div className="figure-card">
-            <p className="kpi-label">Ranking thresholds</p>
-            <p className="kpi-value">{metrics.config.ks.join(' • ')}</p>
+          <div className="stat-card">
+            <p className="kpi-label">Device runtime</p>
+            <p className="kpi-value">{runtimeInfo.platform} · {runtimeInfo.device.toUpperCase()}</p>
+            <p className="kpi-sub">{runtimeInfo.detail}</p>
+            {runtimeInfo.torch ? <p className="kpi-sub">{runtimeInfo.torch}</p> : null}
           </div>
         </div>
       </section>
