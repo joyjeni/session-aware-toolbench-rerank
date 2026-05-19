@@ -60,10 +60,10 @@ type FigureCard = {
 const FIGURES: FigureCard[] = [
   { id: "fig1", title: "Figure 1 · Session-regime NDCG@5 by split", src: "/figures/figure1.png" },
   { id: "fig2", title: "Figure 2 · Significance summary", src: "/figures/figure2.png" },
-  { id: "fig3", title: "Figure 3 · Retrieval overview", src: "/figures/figure3.png" },
+  { id: "fig3", title: "Figure 3 · Best absolute session performance", src: "/figures/figure3.png" },
   { id: "fig4", title: "Figure 4 · Δ (delta) vs Dense", src: "/figures/figure4.png" },
-  { id: "fig5", title: "Figure 5 · Session-aware gains", src: "/figures/figure5.png" },
-  { id: "fig6", title: "Figure 6 · Open-corpus view", src: "/figures/figure6.png" },
+  { id: "fig5", title: "Figure 5 · Hit@5 session-aware gains", src: "/figures/figure5.png" },
+  { id: "fig6", title: "Figure 6 · Open vs session comparison", src: "/figures/figure6.png" },
 ];
 
 function asNumber(value: unknown): number | null {
@@ -108,7 +108,6 @@ function maxBy<T>(items: T[], getValue: (item: T) => number | null): T | null {
       bestValue = value;
     }
   }
-
   return best;
 }
 
@@ -144,6 +143,97 @@ function extractSessionRows(metrics: MetricsData): SessionRow[] {
     .sort((a, b) => a.split.localeCompare(b.split));
 }
 
+function buildFigureInsights(metrics: MetricsData | null, rows: SessionRow[]) {
+  if (!metrics) {
+    return {
+      fig1: "Loading metrics…",
+      fig2: "Loading significance results…",
+      fig3: "Loading best split…",
+      fig4: "Loading delta summary…",
+      fig5: "Loading Hit@5 gains…",
+      fig6: "Loading regime comparison…",
+    };
+  }
+
+  const sig = metrics.significance__SessionRerank_vs_Dense ?? {};
+  const peakDense = maxBy(rows, (r) => r.deltaDense);
+  const bestSession = maxBy(rows, (r) => r.session);
+
+  const ndcg5SigRows = Object.entries(sig)
+    .map(([split, regimes]) => ({
+      split,
+      p: asNumber(regimes?.session?.["NDCG@5"]?.p_value),
+      gain: asNumber(regimes?.session?.["NDCG@5"]?.delta_rel_pct),
+      meanDelta: asNumber(regimes?.session?.["NDCG@5"]?.delta_mean),
+    }))
+    .filter((x) => x.gain != null);
+
+  const hit5SigRows = Object.entries(sig)
+    .map(([split, regimes]) => ({
+      split,
+      p: asNumber(regimes?.session?.["Hit@5"]?.p_value),
+      gain: asNumber(regimes?.session?.["Hit@5"]?.delta_rel_pct),
+      meanDelta: asNumber(regimes?.session?.["Hit@5"]?.delta_mean),
+    }))
+    .filter((x) => x.gain != null);
+
+  const ndcg10SigRows = Object.entries(sig)
+    .map(([split, regimes]) => ({
+      split,
+      p: asNumber(regimes?.session?.["NDCG@10"]?.p_value),
+      gain: asNumber(regimes?.session?.["NDCG@10"]?.delta_rel_pct),
+      meanDelta: asNumber(regimes?.session?.["NDCG@10"]?.delta_mean),
+    }))
+    .filter((x) => x.gain != null);
+
+  const topNdcg5 = maxBy(ndcg5SigRows, (r) => r.gain);
+  const topHit5 = maxBy(hit5SigRows, (r) => r.gain);
+  const topNdcg10 = maxBy(ndcg10SigRows, (r) => r.gain);
+
+  const meanDeltaDense = mean(rows.map((r) => r.deltaDense));
+  const openVsSession = Object.entries(metrics.splits ?? {})
+    .map(([split, splitData]) => {
+      const openDense = asNumber(splitData.regimes?.open?.["Dense (all-MiniLM-L6-v2)"]?.["NDCG@5"]);
+      const sessionRerank = asNumber(
+        splitData.regimes?.session?.["SessionRerank(Dense (all-MiniLM-L6-v2))"]?.["NDCG@5"]
+      );
+      return {
+        split,
+        improvement: relativePct(openDense, sessionRerank),
+      };
+    })
+    .filter((x) => x.improvement != null);
+
+  const bestOpenToSession = maxBy(openVsSession, (r) => r.improvement);
+
+  return {
+    fig1: peakDense
+      ? `${splitLabel(peakDense.split)} has the largest relative NDCG@5 gain over Dense in the session regime at ${fmtPct(peakDense.deltaDense)}.`
+      : "No session NDCG@5 gain found.",
+
+    fig2: topNdcg5
+      ? `The strongest significant NDCG@5 session gain appears on ${splitLabel(topNdcg5.split)} with ${fmtPct(topNdcg5.gain)} relative improvement and p=${fmtP(topNdcg5.p)}.`
+      : "No significance summary available.",
+
+    fig3: bestSession
+      ? `${splitLabel(bestSession.split)} has the highest absolute SessionRerank NDCG@5 at ${fmtNum(bestSession.session)}.`
+      : "No best-performing session split found.",
+
+    fig4:
+      meanDeltaDense != null
+        ? `Δ (delta) vs Dense is computed as ((SessionRerank - Dense) / Dense) × 100. The mean split-wise NDCG@5 gain is ${fmtPct(meanDeltaDense)}.`
+        : "No delta summary available.",
+
+    fig5: topHit5
+      ? `For Hit@5, the largest session gain over Dense occurs on ${splitLabel(topHit5.split)} at ${fmtPct(topHit5.gain)} with p=${fmtP(topHit5.p)}.`
+      : "No Hit@5 gain data available.",
+
+    fig6: bestOpenToSession
+      ? `${splitLabel(bestOpenToSession.split)} shows the largest jump from open Dense to session SessionRerank in NDCG@5 at ${fmtPct(bestOpenToSession.improvement)}.`
+      : "No open-to-session comparison available.",
+  };
+}
+
 function StatCard({
   label,
   value,
@@ -154,7 +244,7 @@ function StatCard({
   hint?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-sm backdrop-blur">
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-sm">
       <div className="text-xs uppercase tracking-[0.18em] text-white/55">{label}</div>
       <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
       {hint ? <div className="mt-2 text-sm text-white/60">{hint}</div> : null}
@@ -162,66 +252,24 @@ function StatCard({
   );
 }
 
-function Pill({
+function Badge({
   children,
   tone = "neutral",
-  title,
 }: {
   children: React.ReactNode;
-  tone?: "neutral" | "green" | "blue" | "amber";
-  title?: string;
+  tone?: "neutral" | "green" | "blue";
 }) {
-  const toneClass =
+  const styles =
     tone === "green"
-      ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/20"
+      ? "border-emerald-400/20 bg-emerald-500/15 text-emerald-300"
       : tone === "blue"
-      ? "bg-cyan-500/15 text-cyan-300 border-cyan-400/20"
-      : tone === "amber"
-      ? "bg-amber-500/15 text-amber-300 border-amber-400/20"
-      : "bg-white/5 text-white/70 border-white/10";
+      ? "border-cyan-400/20 bg-cyan-500/15 text-cyan-300"
+      : "border-white/10 bg-white/5 text-white/70";
 
   return (
-    <span
-      title={title}
-      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${toneClass}`}
-    >
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${styles}`}>
       {children}
     </span>
-  );
-}
-
-function Th({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <th
-      className={`border-b border-white/10 px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.16em] text-white/55 ${className}`}
-    >
-      {children}
-    </th>
-  );
-}
-
-function Td({
-  children,
-  className = "",
-  colSpan,
-}: {
-  children: React.ReactNode;
-  className?: string;
-  colSpan?: number;
-}) {
-  return (
-    <td
-      colSpan={colSpan}
-      className={`border-b border-white/6 px-4 py-3 align-top text-sm text-white/85 ${className}`}
-    >
-      {children}
-    </td>
   );
 }
 
@@ -232,7 +280,7 @@ function FigurePanel({
   figure: FigureCard;
   insight: string;
 }) {
-  const [imgFailed, setImgFailed] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   return (
     <article className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]">
@@ -241,17 +289,17 @@ function FigurePanel({
       </div>
 
       <div className="aspect-[16/9] bg-black/20">
-        {!imgFailed ? (
+        {!failed ? (
           <img
             src={figure.src}
             alt={figure.title}
             className="h-full w-full object-contain"
             loading="lazy"
-            onError={() => setImgFailed(true)}
+            onError={() => setFailed(true)}
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center px-6 text-center text-sm text-white/45">
-            Figure image not found at <code className="mx-1 rounded bg-white/10 px-1.5 py-0.5">{figure.src}</code>
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-white/45">
+            Image missing at {figure.src}
           </div>
         )}
       </div>
@@ -266,156 +314,53 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
-
     async function load() {
       try {
         const res = await fetch("/metrics.json", { cache: "no-store" });
         if (!res.ok) throw new Error(`Failed to load metrics.json (${res.status})`);
         const json = (await res.json()) as MetricsData;
-
-        if (active) {
-          setMetrics(json);
-          setError(null);
-        }
-      } catch (err) {
-        if (active) {
-          setError(err instanceof Error ? err.message : "Unknown error");
-        }
+        setMetrics(json);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Unknown error");
       }
     }
-
     load();
-
-    return () => {
-      active = false;
-    };
   }, []);
 
   const sessionRows = useMemo(() => (metrics ? extractSessionRows(metrics) : []), [metrics]);
 
-  const means = useMemo(() => {
-    return {
-      deltaDense: mean(sessionRows.map((r) => r.deltaDense)),
-      deltaTool: mean(sessionRows.map((r) => r.deltaTool)),
-      sessionNdcg5: mean(sessionRows.map((r) => r.session)),
-      denseNdcg5: mean(sessionRows.map((r) => r.dense)),
-      count: sessionRows.length || null,
-    };
-  }, [sessionRows]);
-
-  const peakDeltaRow = useMemo(
-    () => maxBy(sessionRows, (row) => row.deltaDense),
+  const meanDeltaDense = useMemo(
+    () => mean(sessionRows.map((r) => r.deltaDense)),
     [sessionRows]
   );
 
-  const bestSessionRow = useMemo(
-    () => maxBy(sessionRows, (row) => row.session),
+  const peakDelta = useMemo(
+    () => maxBy(sessionRows, (r) => r.deltaDense),
     [sessionRows]
   );
 
-  const significanceSample = useMemo(() => {
-    const sig = metrics?.significance__SessionRerank_vs_Dense;
-    if (!sig) return null;
+  const bestSession = useMemo(
+    () => maxBy(sessionRows, (r) => r.session),
+    [sessionRows]
+  );
 
-    const candidates = Object.entries(sig)
-      .map(([split, regimes]) => {
-        const entry = regimes?.session?.["NDCG@5"];
-        return {
-          split,
-          metric: "NDCG@5",
-          p_value: asNumber(entry?.p_value),
-          delta_mean: asNumber(entry?.delta_mean),
-          delta_rel_pct: asNumber(entry?.delta_rel_pct),
-        };
-      })
-      .filter((x) => x.delta_rel_pct != null);
-
-    return maxBy(candidates, (x) => x.delta_rel_pct);
-  }, [metrics]);
-
-  const figureInsights = useMemo(() => {
-    const sig = metrics?.significance__SessionRerank_vs_Dense ?? {};
-
-    const hit5Peak = maxBy(
-      Object.entries(sig).map(([split, regimes]) => ({
-        split,
-        deltaDense: asNumber(regimes?.session?.["Hit@5"]?.delta_rel_pct),
-      })),
-      (r) => r.deltaDense
-    );
-
-    return {
-      fig1: peakDeltaRow
-        ? `Computed from loaded session-regime NDCG@5 values. ${splitLabel(
-            peakDeltaRow.split
-          )} shows the largest relative gain over Dense at ${fmtPct(peakDeltaRow.deltaDense)}.`
-        : "Session-regime NDCG@5 insight will appear after metrics load.",
-
-      fig2: significanceSample
-        ? `Significance is read from significance__SessionRerank_vs_Dense. The strongest session NDCG@5 gain appears on ${splitLabel(
-            significanceSample.split
-          )} with p=${fmtP(significanceSample.p_value)} and ${fmtPct(
-            significanceSample.delta_rel_pct
-          )} relative gain.`
-        : "Significance insight will appear after metrics load.",
-
-      fig3: bestSessionRow
-        ? `The best absolute session-regime NDCG@5 appears on ${splitLabel(
-            bestSessionRow.split
-          )} at ${fmtNum(bestSessionRow.session)}.`
-        : "Overview insight will appear after metrics load.",
-
-      fig4:
-        means.deltaDense != null
-          ? `Δ (delta) vs Dense is computed as ((SessionRerank - Dense) / Dense) × 100. The mean split-wise gain is ${fmtPct(
-              means.deltaDense
-            )}.`
-          : "Delta insight will appear after metrics load.",
-
-      fig5: hit5Peak
-        ? `Hit@5 significance metadata is loaded from the JSON. ${splitLabel(
-            hit5Peak.split
-          )} has the strongest relative Hit@5 gain over Dense at ${fmtPct(hit5Peak.deltaDense)}.`
-        : "Session-aware gain insight will appear after metrics load.",
-
-      fig6:
-        "This panel remains descriptive because the current JSON does not contain a separate summary block for a standalone open-corpus figure.",
-    };
-  }, [metrics, peakDeltaRow, significanceSample, bestSessionRow, means.deltaDense]);
-
-  const corpusSize = metrics?.config?.corpus_size ?? null;
-  const encoder = metrics?.config?.encoder ?? "—";
-  const weights = metrics?.config?.weights;
+  const figureInsights = useMemo(
+    () => buildFigureInsights(metrics, sessionRows),
+    [metrics, sessionRows]
+  );
 
   return (
     <main className="min-h-screen bg-[#07111a] text-white">
       <div className="mx-auto max-w-7xl px-6 py-10">
-        <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div>
-            <p className="mb-2 text-xs uppercase tracking-[0.24em] text-cyan-300/80">
-              ToolBench · Session-Aware Re-Ranking
-            </p>
-            <h1 className="text-4xl font-semibold tracking-tight text-white">
-              SessionRerank
-            </h1>
-            <p className="mt-3 max-w-3xl text-base text-white/70">
-              History-aware tool re-ranking for LLM agents, with tables and figure
-              captions loaded directly from <code className="rounded bg-white/10 px-1.5 py-0.5 text-white">metrics.json</code>.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <Pill tone="blue">Encoder: {encoder}</Pill>
-            <Pill tone="neutral">Corpus: {corpusSize ?? "—"}</Pill>
-            <Pill
-              tone="green"
-              title="Δ (delta) vs Dense = relative percentage gain of SessionRerank over the Dense baseline."
-            >
-              Δ (delta) vs Dense
-            </Pill>
-          </div>
-        </div>
+        <header className="mb-8">
+          <p className="mb-2 text-xs uppercase tracking-[0.24em] text-cyan-300/80">
+            ToolBench · Session-aware retrieval
+          </p>
+          <h1 className="text-4xl font-semibold tracking-tight">SessionRerank</h1>
+          <p className="mt-3 max-w-3xl text-white/70">
+            Tables, summary cards, and figure explanations are rendered directly from metrics.json.
+          </p>
+        </header>
 
         {error ? (
           <div className="mb-8 rounded-2xl border border-rose-400/20 bg-rose-500/10 p-4 text-sm text-rose-200">
@@ -423,152 +368,70 @@ export default function Page() {
           </div>
         ) : null}
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <section className="grid gap-4 md:grid-cols-3">
           <StatCard
             label="Mean Δ (delta) vs Dense"
-            value={fmtPct(means.deltaDense)}
-            hint={
-              means.count != null
-                ? `Averaged over ${means.count} ToolBench splits`
-                : "Average split-wise relative NDCG@5 gain"
-            }
+            value={fmtPct(meanDeltaDense)}
+            hint="Average split-wise session NDCG@5 gain over Dense"
           />
           <StatCard
             label="Peak Δ (delta) vs Dense"
-            value={peakDeltaRow ? fmtPct(peakDeltaRow.deltaDense) : "—"}
-            hint={peakDeltaRow ? `Largest gain on ${splitLabel(peakDeltaRow.split)}` : "Largest relative session gain"}
-          />
-          <StatCard
-            label="Mean Session NDCG@5"
-            value={fmtNum(means.sessionNdcg5)}
-            hint="Average session-regime NDCG@5 for SessionRerank"
+            value={peakDelta ? fmtPct(peakDelta.deltaDense) : "—"}
+            hint={peakDelta ? splitLabel(peakDelta.split) : "Largest relative gain"}
           />
           <StatCard
             label="Best session split"
-            value={bestSessionRow ? splitLabel(bestSessionRow.split) : "—"}
-            hint={bestSessionRow ? `NDCG@5 ${fmtNum(bestSessionRow.session)}` : "Highest absolute session NDCG@5"}
+            value={bestSession ? splitLabel(bestSession.split) : "—"}
+            hint={bestSession ? `NDCG@5 ${fmtNum(bestSession.session)}` : "Highest absolute session score"}
           />
         </section>
 
-        <section className="mt-10 grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
-          <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-5">
-            <div className="mb-4 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold">Session-regime table</h2>
-                <p className="mt-1 text-sm text-white/60">
-                  These rows are rendered from <code>splits.*.regimes.session</code> in the JSON.
-                </p>
-              </div>
-              <Pill
-                tone="neutral"
-                title="Δ (delta) = ((SessionRerank - Dense) / Dense) × 100"
-              >
-                Δ (delta) formula
-              </Pill>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] border-collapse">
-                <thead>
-                  <tr>
-                    <Th>Split</Th>
-                    <Th>N queries</Th>
-                    <Th>BM25</Th>
-                    <Th>Dense</Th>
-                    <Th>ToolRerank</Th>
-                    <Th>SessionRerank</Th>
-                    <Th>Δ (delta) vs Dense</Th>
-                    <Th>Δ (delta) vs Tool</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sessionRows.map((row) => (
-                    <tr key={row.split} className="hover:bg-white/[0.03]">
-                      <Td className="font-medium text-white">{splitLabel(row.split)}</Td>
-                      <Td>{row.nQueries ?? "—"}</Td>
-                      <Td>{fmtNum(row.bm25)}</Td>
-                      <Td>{fmtNum(row.dense)}</Td>
-                      <Td>{fmtNum(row.tool)}</Td>
-                      <Td>{fmtNum(row.session)}</Td>
-                      <Td>
-                        <Pill tone={row.deltaDense != null && row.deltaDense > 0 ? "green" : "neutral"}>
-                          {fmtPct(row.deltaDense)}
-                        </Pill>
-                      </Td>
-                      <Td>
-                        <Pill tone={row.deltaTool != null && row.deltaTool > 0 ? "blue" : "neutral"}>
-                          {fmtPct(row.deltaTool)}
-                        </Pill>
-                      </Td>
-                    </tr>
-                  ))}
-                  {!sessionRows.length ? (
-                    <tr>
-                      <Td colSpan={8} className="text-white/50">
-                        Loading rows from metrics.json…
-                      </Td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
+        <section className="mt-10 rounded-3xl border border-white/10 bg-white/[0.03] p-5">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-xl font-semibold">Session-regime table</h2>
+            <Badge>Δ = relative gain over Dense</Badge>
           </div>
 
-          <div className="space-y-6">
-            <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-5">
-              <h2 className="text-xl font-semibold">Config</h2>
-              <div className="mt-4 grid gap-3">
-                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-white/50">Encoder</div>
-                  <div className="mt-2 text-sm text-white">{encoder}</div>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-white/50">Corpus size</div>
-                  <div className="mt-2 text-sm text-white">{corpusSize ?? "—"}</div>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-white/50">Weights</div>
-                  <div className="mt-2 grid gap-2 text-sm text-white/85">
-                    <div>w_base: {fmtNum(asNumber(weights?.w_base), 4)}</div>
-                    <div>w_cat: {fmtNum(asNumber(weights?.w_cat), 4)}</div>
-                    <div>w_sch: {fmtNum(asNumber(weights?.w_sch), 4)}</div>
-                    <div>w_ept: {fmtNum(asNumber(weights?.w_ept), 4)}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-5">
-              <h2 className="text-xl font-semibold">Significance sample</h2>
-              {significanceSample ? (
-                <div className="mt-4 space-y-3 text-sm text-white/80">
-                  <div>
-                    <span className="text-white/50">Split:</span>{" "}
-                    {splitLabel(significanceSample.split)}
-                  </div>
-                  <div>
-                    <span className="text-white/50">Metric:</span>{" "}
-                    {significanceSample.metric}
-                  </div>
-                  <div>
-                    <span className="text-white/50">p-value:</span>{" "}
-                    {fmtP(significanceSample.p_value)}
-                  </div>
-                  <div>
-                    <span className="text-white/50">Delta mean:</span>{" "}
-                    {fmtNum(significanceSample.delta_mean, 4)}
-                  </div>
-                  <div>
-                    <span className="text-white/50">Δ (delta) vs Dense:</span>{" "}
-                    {fmtPct(significanceSample.delta_rel_pct)}
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-4 text-sm text-white/55">
-                  Waiting for significance metadata from the loaded JSON.
-                </p>
-              )}
-            </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] border-collapse">
+              <thead>
+                <tr className="border-b border-white/10 text-left text-xs uppercase tracking-[0.16em] text-white/55">
+                  <th className="px-4 py-3">Split</th>
+                  <th className="px-4 py-3">Queries</th>
+                  <th className="px-4 py-3">BM25</th>
+                  <th className="px-4 py-3">Dense</th>
+                  <th className="px-4 py-3">ToolRerank</th>
+                  <th className="px-4 py-3">SessionRerank</th>
+                  <th className="px-4 py-3">Δ vs Dense</th>
+                  <th className="px-4 py-3">Δ vs Tool</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessionRows.map((row) => (
+                  <tr key={row.split} className="border-b border-white/6 hover:bg-white/[0.03]">
+                    <td className="px-4 py-3 font-medium">{splitLabel(row.split)}</td>
+                    <td className="px-4 py-3">{row.nQueries ?? "—"}</td>
+                    <td className="px-4 py-3">{fmtNum(row.bm25)}</td>
+                    <td className="px-4 py-3">{fmtNum(row.dense)}</td>
+                    <td className="px-4 py-3">{fmtNum(row.tool)}</td>
+                    <td className="px-4 py-3">{fmtNum(row.session)}</td>
+                    <td className="px-4 py-3">
+                      <Badge tone="green">{fmtPct(row.deltaDense)}</Badge>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge tone="blue">{fmtPct(row.deltaTool)}</Badge>
+                    </td>
+                  </tr>
+                ))}
+                {!sessionRows.length ? (
+                  <tr>
+                    <td className="px-4 py-5 text-white/50" colSpan={8}>
+                      Loading rows from metrics.json…
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
           </div>
         </section>
 
@@ -576,7 +439,7 @@ export default function Page() {
           <div className="mb-4">
             <h2 className="text-xl font-semibold">Figures</h2>
             <p className="mt-1 text-sm text-white/60">
-              Figures should still render as panels even when an image file is missing.
+              Each figure panel stays visible and explains itself from JSON metrics even if the image file is missing.
             </p>
           </div>
 
