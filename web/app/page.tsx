@@ -51,14 +51,20 @@ type SessionRow = {
   deltaTool: number | null;
 };
 
-const FIGURES = [
-  { id: "fig1", src: "/figures/figure1.png", title: "Figure 1 · Session-regime NDCG@5 by split" },
-  { id: "fig2", src: "/figures/figure2.png", title: "Figure 2 · Significance summary" },
-  { id: "fig3", src: "/figures/figure3.png", title: "Figure 3 · Retrieval overview" },
-  { id: "fig4", src: "/figures/figure4.png", title: "Figure 4 · Δ (delta) vs Dense" },
-  { id: "fig5", src: "/figures/figure5.png", title: "Figure 5 · Session-aware gains" },
-  { id: "fig6", src: "/figures/figure6.png", title: "Figure 6 · Open-corpus view" },
-] as const;
+type FigureCard = {
+  id: string;
+  title: string;
+  src: string;
+};
+
+const FIGURES: FigureCard[] = [
+  { id: "fig1", title: "Figure 1 · Session-regime NDCG@5 by split", src: "/figures/figure1.png" },
+  { id: "fig2", title: "Figure 2 · Significance summary", src: "/figures/figure2.png" },
+  { id: "fig3", title: "Figure 3 · Retrieval overview", src: "/figures/figure3.png" },
+  { id: "fig4", title: "Figure 4 · Δ (delta) vs Dense", src: "/figures/figure4.png" },
+  { id: "fig5", title: "Figure 5 · Session-aware gains", src: "/figures/figure5.png" },
+  { id: "fig6", title: "Figure 6 · Open-corpus view", src: "/figures/figure6.png" },
+];
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -93,6 +99,7 @@ function mean(values: Array<number | null | undefined>): number | null {
 function maxBy<T>(items: T[], getValue: (item: T) => number | null): T | null {
   let best: T | null = null;
   let bestValue = -Infinity;
+
   for (const item of items) {
     const value = getValue(item);
     if (value == null) continue;
@@ -101,6 +108,7 @@ function maxBy<T>(items: T[], getValue: (item: T) => number | null): T | null {
       bestValue = value;
     }
   }
+
   return best;
 }
 
@@ -182,7 +190,13 @@ function Pill({
   );
 }
 
-function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function Th({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
     <th
       className={`border-b border-white/10 px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.16em] text-white/55 ${className}`}
@@ -192,8 +206,59 @@ function Th({ children, className = "" }: { children: React.ReactNode; className
   );
 }
 
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`border-b border-white/6 px-4 py-3 align-top text-sm text-white/85 ${className}`}>{children}</td>;
+function Td({
+  children,
+  className = "",
+  colSpan,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  colSpan?: number;
+}) {
+  return (
+    <td
+      colSpan={colSpan}
+      className={`border-b border-white/6 px-4 py-3 align-top text-sm text-white/85 ${className}`}
+    >
+      {children}
+    </td>
+  );
+}
+
+function FigurePanel({
+  figure,
+  insight,
+}: {
+  figure: FigureCard;
+  insight: string;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  return (
+    <article className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]">
+      <div className="border-b border-white/10 px-5 py-4">
+        <h3 className="text-base font-semibold text-white">{figure.title}</h3>
+      </div>
+
+      <div className="aspect-[16/9] bg-black/20">
+        {!imgFailed ? (
+          <img
+            src={figure.src}
+            alt={figure.title}
+            className="h-full w-full object-contain"
+            loading="lazy"
+            onError={() => setImgFailed(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center px-6 text-center text-sm text-white/45">
+            Figure image not found at <code className="mx-1 rounded bg-white/10 px-1.5 py-0.5">{figure.src}</code>
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-4 text-sm leading-6 text-white/70">{insight}</div>
+    </article>
+  );
 }
 
 export default function Page() {
@@ -208,6 +273,7 @@ export default function Page() {
         const res = await fetch("/metrics.json", { cache: "no-store" });
         if (!res.ok) throw new Error(`Failed to load metrics.json (${res.status})`);
         const json = (await res.json()) as MetricsData;
+
         if (active) {
           setMetrics(json);
           setError(null);
@@ -220,6 +286,7 @@ export default function Page() {
     }
 
     load();
+
     return () => {
       active = false;
     };
@@ -233,6 +300,7 @@ export default function Page() {
       deltaTool: mean(sessionRows.map((r) => r.deltaTool)),
       sessionNdcg5: mean(sessionRows.map((r) => r.session)),
       denseNdcg5: mean(sessionRows.map((r) => r.dense)),
+      count: sessionRows.length || null,
     };
   }, [sessionRows]);
 
@@ -300,7 +368,7 @@ export default function Page() {
 
       fig4:
         means.deltaDense != null
-          ? `Δ (delta) vs Dense is computed as relative percentage improvement: (SessionRerank - Dense) / Dense × 100. The mean split-wise gain is ${fmtPct(
+          ? `Δ (delta) vs Dense is computed as ((SessionRerank - Dense) / Dense) × 100. The mean split-wise gain is ${fmtPct(
               means.deltaDense
             )}.`
           : "Delta insight will appear after metrics load.",
@@ -312,14 +380,13 @@ export default function Page() {
         : "Session-aware gain insight will appear after metrics load.",
 
       fig6:
-        "This panel stays descriptive because the current JSON does not expose a separate open-corpus summary block beyond split/regime metrics.",
+        "This panel remains descriptive because the current JSON does not contain a separate summary block for a standalone open-corpus figure.",
     };
-  }, [metrics, means.deltaDense, peakDeltaRow, significanceSample, bestSessionRow]);
+  }, [metrics, peakDeltaRow, significanceSample, bestSessionRow, means.deltaDense]);
 
   const corpusSize = metrics?.config?.corpus_size ?? null;
   const encoder = metrics?.config?.encoder ?? "—";
   const weights = metrics?.config?.weights;
-  const visibleFigures = FIGURES;
 
   return (
     <main className="min-h-screen bg-[#07111a] text-white">
@@ -327,15 +394,14 @@ export default function Page() {
         <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="mb-2 text-xs uppercase tracking-[0.24em] text-cyan-300/80">
-              ToolBench · Session-aware re-ranking
+              ToolBench · Session-Aware Re-Ranking
             </p>
             <h1 className="text-4xl font-semibold tracking-tight text-white">
               SessionRerank
             </h1>
             <p className="mt-3 max-w-3xl text-base text-white/70">
-              History-aware tool re-ranking with metrics loaded directly from{" "}
-              <code className="rounded bg-white/10 px-1.5 py-0.5 text-white">metrics.json</code>.
-              Delta labels are computed dynamically from the loaded benchmark values.
+              History-aware tool re-ranking for LLM agents, with tables and figure
+              captions loaded directly from <code className="rounded bg-white/10 px-1.5 py-0.5 text-white">metrics.json</code>.
             </p>
           </div>
 
@@ -361,22 +427,26 @@ export default function Page() {
           <StatCard
             label="Mean Δ (delta) vs Dense"
             value={fmtPct(means.deltaDense)}
-            hint="Average split-wise relative NDCG@5 gain in the session regime."
+            hint={
+              means.count != null
+                ? `Averaged over ${means.count} ToolBench splits`
+                : "Average split-wise relative NDCG@5 gain"
+            }
           />
           <StatCard
             label="Peak Δ (delta) vs Dense"
             value={peakDeltaRow ? fmtPct(peakDeltaRow.deltaDense) : "—"}
-            hint={peakDeltaRow ? splitLabel(peakDeltaRow.split) : "Peak split will appear after load."}
+            hint={peakDeltaRow ? `Largest gain on ${splitLabel(peakDeltaRow.split)}` : "Largest relative session gain"}
           />
           <StatCard
             label="Mean Session NDCG@5"
             value={fmtNum(means.sessionNdcg5)}
-            hint="Average session-regime NDCG@5 for SessionRerank."
+            hint="Average session-regime NDCG@5 for SessionRerank"
           />
           <StatCard
             label="Best session split"
             value={bestSessionRow ? splitLabel(bestSessionRow.split) : "—"}
-            hint={bestSessionRow ? `NDCG@5 ${fmtNum(bestSessionRow.session)}` : "Best split will appear after load."}
+            hint={bestSessionRow ? `NDCG@5 ${fmtNum(bestSessionRow.session)}` : "Highest absolute session NDCG@5"}
           />
         </section>
 
@@ -386,7 +456,7 @@ export default function Page() {
               <div>
                 <h2 className="text-xl font-semibold">Session-regime table</h2>
                 <p className="mt-1 text-sm text-white/60">
-                  NDCG@5 values are read from <code>splits.*.regimes.session</code>. Δ is computed live from loaded values.
+                  These rows are rendered from <code>splits.*.regimes.session</code> in the JSON.
                 </p>
               </div>
               <Pill
@@ -434,7 +504,7 @@ export default function Page() {
                   ))}
                   {!sessionRows.length ? (
                     <tr>
-                      <Td className="text-white/50" colSpan={8}>
+                      <Td colSpan={8} className="text-white/50">
                         Loading rows from metrics.json…
                       </Td>
                     </tr>
@@ -506,31 +576,17 @@ export default function Page() {
           <div className="mb-4">
             <h2 className="text-xl font-semibold">Figures</h2>
             <p className="mt-1 text-sm text-white/60">
-              Figures stay visible, and captions are derived from the live JSON where possible.
+              Figures should still render as panels even when an image file is missing.
             </p>
           </div>
 
           <div className="grid gap-6 lg:grid-cols-2">
-            {visibleFigures.map((fig) => (
-              <article
-                key={fig.id}
-                className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03]"
-              >
-                <div className="border-b border-white/10 px-5 py-4">
-                  <h3 className="text-base font-semibold text-white">{fig.title}</h3>
-                </div>
-                <div className="aspect-[16/9] bg-black/20">
-                  <img
-                    src={fig.src}
-                    alt={fig.title}
-                    className="h-full w-full object-contain"
-                    loading="lazy"
-                  />
-                </div>
-                <div className="px-5 py-4 text-sm leading-6 text-white/70">
-                  {figureInsights[fig.id as keyof typeof figureInsights]}
-                </div>
-              </article>
+            {FIGURES.map((figure) => (
+              <FigurePanel
+                key={figure.id}
+                figure={figure}
+                insight={figureInsights[figure.id as keyof typeof figureInsights]}
+              />
             ))}
           </div>
         </section>
