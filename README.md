@@ -83,7 +83,7 @@ See `paper/method.md` for the static formulation and `WRITEUP.md` for the co-act
 ```
 @misc{sessionrerank2026,
   title  = {SessionRerank+: Co-activation Cached Tool Retrieval for Multi-turn Agentic LLMs},
-  author = {Abigail Creations},
+  author = {Jenisha T},
   year   = {2026},
   url    = {https://github.com/joyjeni/session-aware-toolbench-rerank}
 }
