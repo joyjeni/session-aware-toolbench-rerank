@@ -202,8 +202,16 @@ def main():
     _p(doc, "The Gemma 4 component serves two roles. First, for embedding: google/embeddinggemma-300m (Gemma 4 family, 768 dimensions) encodes the query and the API catalog at inference, with results cached after the first call. Second, for re-ranking the top-100 dense candidates: a Gemma 4 e2b-it model (Gemma Team, 2024) fine-tuned with Unsloth (Daniel and Michael, 2024) on 16 000 ToolBench trajectories acts as a prompted reranker (313 LoRA steps on T4 dual GPU in 37 minutes; training loss 1.221 to 0.188). For deployment robustness the live demonstration uses the Hugging Face Inference API, falling back to a smaller MiniLM encoder (Wang et al., 2020) when the Gemma endpoint is cold, with the served path surfaced in the user interface.",
        indent_cm=0.3, space_after_pt=4)
 
+    # Embed Fig 1 image
+    fig1_path = HERE / "figures" / "fig1_architecture.png"
+    if fig1_path.exists():
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(4)
+        fp.paragraph_format.space_after = Pt(2)
+        fp.add_run().add_picture(str(fig1_path), width=Cm(8.4))
     p = doc.add_paragraph()
-    pf = p.paragraph_format; pf.space_after = Pt(8); pf.space_before = Pt(4)
+    pf = p.paragraph_format; pf.space_after = Pt(8); pf.space_before = Pt(2)
     r = p.add_run("Fig. 1 "); _set_run(r, bold=True)
     r = p.add_run("Architecture of SessionRerank+. The Gemma 4 dense retriever, profile mask, and co-activation cache contribute orthogonal signals. The cache updates online on successful (a to b) transitions.")
     _set_run(r, italic=True)
@@ -247,7 +255,15 @@ def main():
             run = cells[j].paragraphs[0].add_run(val)
             _set_run(run, size=9, bold=(i == 0 or i == len(table_data) - 1))
 
-    _p(doc, "", space_after_pt=4)
+    _p(doc, "", space_after_pt=2)
+    # Embed Fig 2 image
+    fig2_path = HERE / "figures" / "fig2_two_turn.png"
+    if fig2_path.exists():
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(4)
+        fp.paragraph_format.space_after = Pt(2)
+        fp.add_run().add_picture(str(fig2_path), width=Cm(8.4))
     p = doc.add_paragraph()
     r = p.add_run("Fig. 2 "); _set_run(r, bold=True)
     r = p.add_run("Co-activation effect on a two-turn ragi scenario. Turn 1 (cold): KSDA Pest Alert is top, PMFBY ranks third. Turn 2 (after the user chose Plantix on Turn 1): PMFBY moves to rank 1 with a co-activation bonus of +1.39 because the standard-operating-procedure edge has been reinforced.")
