@@ -17,9 +17,9 @@ We built **SessionRerank+** to fix this.
 
 When two API calls succeed back-to-back in a real session, they are *co-activated*. A session-aware retriever should remember that co-activation and use it to bias future ranking — but it should also let stale edges decay so the cache doesn't ossify. This is a standard adaptive-cache pattern (LRU + exponential decay) lifted to the bipartite graph of (api\_a → api\_b) tool-call transitions.
 
-For every successful transition observed during training or live use, we **increment the edge weight** w_{u,v} by δ. Between sessions, the entire matrix is multiplied by (1 − ρ). At inference, the score of candidate API *v* given session history H = [h₁, …, hₙ] is:
+For every successful transition observed during training or live use, we **increment the edge weight** $w_{u,v}$ by $\delta$. Between sessions, the entire matrix is multiplied by $(1 - \rho)$. At inference, the score of candidate API $v$ given session history $H = [h_1, \ldots, h_n]$ is:
 
-$$\text{score}(v \mid H) = w_{\text{dense}} \cdot s_{\text{dense}}(q, v) + w_{\text{mask}} \cdot m(v, \text{profile}) + w_{\text{co}} \cdot \sum_{i} \gamma^{n-i} \cdot \log(1 + w_{h_i, v})$$
+$$\text{score}(v \mid H) \;=\; w_{\text{dense}}\,s_{\text{dense}}(q,v) \;+\; w_{\text{mask}}\,m(v,\text{profile}) \;+\; w_{\text{co}}\sum_{i=1}^{n}\gamma^{\,n-i}\log\!\bigl(1+w_{h_i,v}\bigr)$$
 
 Three orthogonal signals:
 

@@ -24,9 +24,8 @@
 > An adaptive cache reinforces edges that lead to successful tool transitions, and lets unused edges decay. Two properties matter for tool retrieval: recency-of-success dominates, and stale paths fade. We applied this directly to chains of API calls. Every successful tool transition increments an edge weight w. Every session, the entire matrix decays by rho. The result is a session-aware prior that gets sharper the more a farmer uses the system.
 
 **On-screen formula (Canva overlay, hold for 5s):**
-```
-score(v | H) = w_dense·dense(q, v) + w_mask·profile(v) + w_co·Σ γ^(n-i) log(1 + w_{h_i, v})
-```
+
+$$\text{score}(v \mid H) = w_{\text{dense}}\,\text{dense}(q,v) + w_{\text{mask}}\,\text{profile}(v) + w_{\text{co}}\sum_{i=1}^{n}\gamma^{\,n-i}\log\!\bigl(1+w_{h_i,v}\bigr)$$
 
 ---
 

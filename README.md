@@ -77,7 +77,10 @@ Open `notebooks/run_on_colab.ipynb`, run all cells.
 
 ## Method
 See `paper/method.md` for the static formulation and `WRITEUP.md` for the co-activation extension. In one line:
-> Score(v | q, H) = w_dense·dense(q,v) + w_mask·profile(v) + w_co·Σ γ^(n−i) log(1 + w_{h_i, v}) — where w_{u,v} is a session-time-varying co-activation edge weight, incremented by δ on successful (a→b) transitions and decaying by ρ each session.
+
+$$\text{score}(v \mid q, H) = w_{\text{dense}}\,\text{dense}(q,v) + w_{\text{mask}}\,\text{profile}(v) + w_{\text{co}}\sum_{i=1}^{n}\gamma^{\,n-i}\log\!\bigl(1 + w_{h_i,v}\bigr)$$
+
+where $w_{u,v}$ is a session-time-varying co-activation edge weight, incremented by $\delta$ on successful $(a\!\to\!b)$ transitions and decaying by $\rho$ each session.
 
 ## Citation
 ```
