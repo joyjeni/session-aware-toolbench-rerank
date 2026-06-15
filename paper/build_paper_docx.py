@@ -216,6 +216,20 @@ def main():
     r = p.add_run("Architecture of SessionRerank+. The Gemma 4 dense retriever, profile mask, and co-activation cache contribute orthogonal signals. The cache updates online on successful (a to b) transitions.")
     _set_run(r, italic=True)
 
+    # Embed Fig 2 image: two-turn worked example (in method section)
+    fig2_path = HERE / "figures" / "fig2_two_turn.png"
+    if fig2_path.exists():
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(4)
+        fp.paragraph_format.space_after = Pt(2)
+        fp.add_run().add_picture(str(fig2_path), width=Cm(8.4))
+    p = doc.add_paragraph()
+    r = p.add_run("Fig. 2 "); _set_run(r, bold=True)
+    r = p.add_run("Worked example: how the co-activation cache reshapes ranking. Turn 1 selects KSNDMC; the cache updates C(KSNDMC, KSDA Pest) to 0.31; Turn 2 lifts KSDA Pest from rank #2 (dense baseline) to rank #1 by adding the cache score to the fused re-ranker output.")
+    _set_run(r, italic=True)
+    pf = p.paragraph_format; pf.space_after = Pt(6)
+
     # Experimental setup
     _section_heading(doc, "Experimental setup")
     _p(doc, "We evaluate on the ToolBench G1, G2, and G3 retrieval splits (Qin et al., 2023) under the open test regime, and on a held-out Karnataka query bank of 100 farmer queries hand-labeled by extension officers from Tumakuru and Mandya districts. The Karnataka catalog contains fifteen real APIs: KSNDMC weather and drought feeds, Bhoomi land records, Bhoochitra geographic information system, Raitha Mitra advisory, K-Kisan helpline, KSDA pest alerts, University of Agricultural Sciences Bangalore (UAS-B) Plantix offline pest identification, Soil Health Card, the KSDA nitrogen-phosphorus-potassium calculator, Agmarknet Karnataka mandi prices, the Rashtriya e-Market Services unified market, PM-KISAN, PMFBY, and Karnataka Milk Federation (KMF) Nandini procurement rates.",
@@ -256,22 +270,53 @@ def main():
             _set_run(run, size=9, bold=(i == 0 or i == len(table_data) - 1))
 
     _p(doc, "", space_after_pt=2)
-    # Embed Fig 2 image
-    fig2_path = HERE / "figures" / "fig2_two_turn.png"
-    if fig2_path.exists():
+
+    # Embed Fig 3 image: ToolBench NDCG@5 / Hit@5 bars
+    fig3_path = HERE / "figures" / "fig3_toolbench_bars.png"
+    if fig3_path.exists():
         fp = doc.add_paragraph()
         fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         fp.paragraph_format.space_before = Pt(4)
         fp.paragraph_format.space_after = Pt(2)
-        fp.add_run().add_picture(str(fig2_path), width=Cm(8.4))
+        fp.add_run().add_picture(str(fig3_path), width=Cm(8.4))
     p = doc.add_paragraph()
-    r = p.add_run("Fig. 2 "); _set_run(r, bold=True)
-    r = p.add_run("Co-activation effect on a two-turn ragi scenario. Turn 1 (cold): KSDA Pest Alert is top, PMFBY ranks third. Turn 2 (after the user chose Plantix on Turn 1): PMFBY moves to rank 1 with a co-activation bonus of +1.39 because the standard-operating-procedure edge has been reinforced.")
+    r = p.add_run("Fig. 3 "); _set_run(r, bold=True)
+    r = p.add_run("ToolBench (open test) retrieval quality across the cascade. SessionRerank+ leads on both NDCG@5 and Hit@5; the gap over Gemma 4 fine-tuned is driven entirely by the co-activation cache, since the underlying re-ranker is shared.")
     _set_run(r, italic=True)
     pf = p.paragraph_format; pf.space_after = Pt(6)
 
+    # Embed Fig 4 image: NDCG@K across K
+    fig4_path = HERE / "figures" / "fig4_ndcg_at_k.png"
+    if fig4_path.exists():
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(4)
+        fp.paragraph_format.space_after = Pt(2)
+        fp.add_run().add_picture(str(fig4_path), width=Cm(8.4))
+    p = doc.add_paragraph()
+    r = p.add_run("Fig. 4 "); _set_run(r, bold=True)
+    r = p.add_run("NDCG@K (K = 1, 3, 5, 10) across methods. SessionRerank+ remains the best-performing system at every K, including K = 1, which is the operational regime for single-tool selection.")
+    _set_run(r, italic=True)
+    pf = p.paragraph_format; pf.space_after = Pt(6)
+
+    # (Fig 2 already shown earlier inline in the method section as worked example)
+
     _p(doc, "Ablating the co-activation cache (i.e. replacing the live update of equation (3) with the static co-occurrence prior of Qin et al., 2023) reduces NDCG at rank 5 from 0.892 to 0.881 and Karnataka first-hit from 0.91 to 0.86, isolating the contribution of session-time-varying edges to a +0.011 NDCG / +0.05 first-hit lift on top of the fine-tuned Gemma 4 ranker. Removing the profile mask (setting w_m = 0) reduces Karnataka first-hit to 0.79, indicating that the structural filter contributes nearly as much as the cache on the deployment metric.",
        indent_cm=0.3, space_after_pt=4)
+
+    # Embed Fig 5 (Karnataka deployment) just before the Impact section
+    fig5_path = HERE / "figures" / "fig5_karnataka_flow.png"
+    if fig5_path.exists():
+        fp = doc.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.paragraph_format.space_before = Pt(4)
+        fp.paragraph_format.space_after = Pt(2)
+        fp.add_run().add_picture(str(fig5_path), width=Cm(8.4))
+    p = doc.add_paragraph()
+    r = p.add_run("Fig. 5 "); _set_run(r, bold=True)
+    r = p.add_run("Karnataka field deployment. Three farmer personas (Ramesh / ragi in Tumakuru, Lakshmi / sugarcane in Mandya, Suresh / coffee + coconut in Hassan) interact with the SessionRerank+ runtime, which routes their turn-linked queries to the appropriate Karnataka API. Response telemetry (timestamp, latency, status) feeds both the co-activation cache and the audit log used for the data.gov.in committee evidence file.")
+    _set_run(r, italic=True)
+    pf = p.paragraph_format; pf.space_after = Pt(6)
 
     # Impact
     _section_heading(doc, "Impact")
