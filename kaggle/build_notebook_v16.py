@@ -1,0 +1,344 @@
+"""Build SessionRerank+ Kaggle notebook v16.
+
+v16 fixes (on top of v15):
+  * Uninstall conflicting cu128 torchaudio/torchvision/torch BEFORE
+    reinstalling the device-appropriate wheel.
+  * Force numpy 1.26.4 reinstall AFTER pip dependency resolution chaos so
+    the numpy.dtype binary-incompat error in random/mtrand never fires.
+  * Install the repo as an editable package (`pip install -e .`) so the
+    subprocess that runs `python -m sessionrerank.eval.run_all` can find
+    the module from any cwd. v15 added it to sys.path but the subprocess
+    started a fresh interpreter that didn't inherit it.
+"""
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "sessionrerank_gemma4_kaggle.ipynb"
+
+
+def md(*lines):
+    return {"cell_type": "markdown", "metadata": {}, "source": list(lines)}
+
+
+def code(*lines):
+    return {
+        "cell_type": "code",
+        "metadata": {},
+        "execution_count": None,
+        "outputs": [],
+        "source": list(lines),
+    }
+
+
+cells = [
+    md(
+        "# SessionRerank+ · Karnataka Smallholder Agriculture (v16 — adaptive + install fix)\n",
+        "### *Co-activation cached tool retrieval, powered by Gemma 4*\n",
+        "\n",
+        "**v16 changes:** uninstall conflicting cu128 torchaudio first, force "
+        "numpy<2 reinstall after deps, install repo as editable package so "
+        "subprocesses find sessionrerank.*\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md("## 1. Detect device + compute capability"),
+    code(
+        "import os, subprocess, platform\n",
+        "def _gpu_info():\n",
+        "    try:\n",
+        "        out = subprocess.run(\n",
+        "            ['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader'],\n",
+        "            capture_output=True, text=True, timeout=10)\n",
+        "        if out.returncode != 0 or not out.stdout.strip():\n",
+        "            return ('cpu', 0, 0, 'cpu')\n",
+        "        name, cc = [x.strip() for x in out.stdout.strip().splitlines()[0].split(',')]\n",
+        "        maj, mn = cc.split('.')\n",
+        "        return ('cuda', int(maj), int(mn), name)\n",
+        "    except Exception as e:\n",
+        "        print('nvidia-smi probe failed:', e); return ('cpu', 0, 0, 'cpu')\n",
+        "DEVICE, CC_MAJOR, CC_MINOR, GPU_NAME = _gpu_info()\n",
+        "CC = CC_MAJOR * 10 + CC_MINOR\n",
+        "print(f'Device:      {DEVICE}')\n",
+        "print(f'GPU name:    {GPU_NAME}')\n",
+        "print(f'Compute cap: {CC_MAJOR}.{CC_MINOR}  (CC code = {CC})')\n",
+        "print(f'Python:      {platform.python_version()}')\n",
+        "if DEVICE == 'cpu':       DTYPE_STR = 'fp32'\n",
+        "elif CC < 70:             DTYPE_STR = 'fp32'\n",
+        "elif CC < 80:             DTYPE_STR = 'fp16'\n",
+        "else:                     DTYPE_STR = 'bf16'\n",
+        "print(f'Selected dtype path: {DTYPE_STR}')\n",
+        "os.environ['SR_DEVICE'] = DEVICE\n",
+        "os.environ['SR_DTYPE']  = DTYPE_STR\n",
+        "os.environ['SR_CC']     = str(CC)\n",
+        "os.environ['SR_GPU']    = GPU_NAME\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md(
+        "## 2. Install torch compatible with the detected GPU\n",
+        "Uninstall cu128 family FIRST, then install device-appropriate wheel, "
+        "then pin numpy<2 (without dependency resolution)."
+    ),
+    code(
+        "import subprocess, sys, os\n",
+        "DEVICE = os.environ['SR_DEVICE']\n",
+        "CC = int(os.environ['SR_CC'])\n",
+        "def run(*c, check=False):\n",
+        "    print('+', ' '.join(c), flush=True)\n",
+        "    p = subprocess.Popen(list(c), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)\n",
+        "    for line in p.stdout:\n",
+        "        print(line.rstrip(), flush=True)\n",
+        "    p.wait()\n",
+        "    if check and p.returncode != 0:\n",
+        "        raise RuntimeError(f'cmd failed: {c}')\n",
+        "    return p.returncode\n",
+        "\n",
+        "# Step 1: uninstall ALL preinstalled torch family\n",
+        "run(sys.executable, '-m', 'pip', 'uninstall', '-y', '-q',\n",
+        "    'torchaudio', 'torchvision', 'torch')\n",
+        "\n",
+        "# Step 2: install device-appropriate wheel\n",
+        "if DEVICE == 'cpu':\n",
+        "    idx = 'https://download.pytorch.org/whl/cpu'\n",
+        "elif CC < 70:\n",
+        "    idx = 'https://download.pytorch.org/whl/cu118'\n",
+        "else:\n",
+        "    idx = 'https://download.pytorch.org/whl/cu121'\n",
+        "run(sys.executable, '-m', 'pip', 'install', '-q',\n",
+        "    '--index-url', idx, 'torch==2.4.1', 'torchvision==0.19.1', check=True)\n",
+        "\n",
+        "# Step 3: force numpy<2 (no-deps so it doesn't drag anything else)\n",
+        "run(sys.executable, '-m', 'pip', 'install', '-q',\n",
+        "    '--force-reinstall', '--no-deps', 'numpy==1.26.4', check=True)\n",
+        "\n",
+        "# Step 4: smoke test\n",
+        "import importlib, sys as _s\n",
+        "for mod in ('numpy', 'torch'):\n",
+        "    if mod in _s.modules:\n",
+        "        del _s.modules[mod]\n",
+        "import numpy as np\n",
+        "import torch\n",
+        "print('numpy:', np.__version__, '(want 1.26.4)')\n",
+        "print('torch:', torch.__version__, 'cuda?', torch.cuda.is_available())\n",
+        "if torch.cuda.is_available():\n",
+        "    x = torch.randn(8, 8, device='cuda', dtype=torch.float32)\n",
+        "    y = (x @ x.T).sum().item()\n",
+        "    print('cuda smoke test OK; matmul sum =', y)\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md("## 3. Clone repo, install lightweight deps + the repo as editable package"),
+    code(
+        "import subprocess, sys, pathlib, os\n",
+        "def run(*c, check=False):\n",
+        "    print('+', ' '.join(c), flush=True)\n",
+        "    p = subprocess.Popen(list(c), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)\n",
+        "    for line in p.stdout:\n",
+        "        print(line.rstrip(), flush=True)\n",
+        "    p.wait()\n",
+        "    if check and p.returncode != 0:\n",
+        "        raise RuntimeError(f'cmd failed: {c}')\n",
+        "    return p.returncode\n",
+        "\n",
+        "run('git', 'clone', '--depth', '1',\n",
+        "    'https://github.com/joyjeni/session-aware-toolbench-rerank.git',\n",
+        "    '/kaggle/working/sr', check=True)\n",
+        "\n",
+        "run(sys.executable, '-m', 'pip', 'install', '-q',\n",
+        "    'transformers>=4.45', 'sentence-transformers>=3.0',\n",
+        "    'huggingface_hub>=0.24', 'pandas', 'scikit-learn',\n",
+        "    'rank-bm25', 'tqdm', 'matplotlib')\n",
+        "\n",
+        "# Re-pin numpy<2 after transformers install (it may have pulled numpy 2.x)\n",
+        "run(sys.executable, '-m', 'pip', 'install', '-q',\n",
+        "    '--force-reinstall', '--no-deps', 'numpy==1.26.4', check=True)\n",
+        "\n",
+        "# Install the repo as an editable package so subprocesses can `python -m sessionrerank...`\n",
+        "repo = pathlib.Path('/kaggle/working/sr')\n",
+        "if not ((repo/'pyproject.toml').exists() or (repo/'setup.py').exists()):\n",
+        "    (repo/'setup.py').write_text(\n",
+        "        \"from setuptools import setup, find_packages\\n\"\n",
+        "        \"setup(name='sessionrerank', version='0.1.0',\\n\"\n",
+        "        \"      package_dir={'': 'src'}, packages=find_packages(where='src'),\\n\"\n",
+        "        \"      python_requires='>=3.8')\\n\")\n",
+        "    print('Wrote', repo/'setup.py')\n",
+        "run(sys.executable, '-m', 'pip', 'install', '-q', '-e', str(repo), check=True)\n",
+        "\n",
+        "os.chdir('/kaggle/working/sr')\n",
+        "sys.path.insert(0, '/kaggle/working/sr/src')\n",
+        "print('Repo @', pathlib.Path('.').resolve())\n",
+        "run('ls')\n",
+        "\n",
+        "# Verify the import works in BOTH this process AND a subprocess\n",
+        "import importlib\n",
+        "try:\n",
+        "    importlib.import_module('sessionrerank')\n",
+        "    print('sessionrerank package (this process): importable ✓')\n",
+        "except Exception as e:\n",
+        "    print('sessionrerank package (this process): FAILED:', e)\n",
+        "run(sys.executable, '-c', 'import sessionrerank; print(\"sessionrerank package (subprocess):\", sessionrerank.__file__)')\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md("## 4. HF token (optional)"),
+    code(
+        "import os\n",
+        "try:\n",
+        "    from kaggle_secrets import UserSecretsClient\n",
+        "    os.environ['HF_TOKEN'] = UserSecretsClient().get_secret('HF_TOKEN')\n",
+        "    print('HF_TOKEN injected.')\n",
+        "except Exception as e:\n",
+        "    print('No HF_TOKEN secret — Gemma fine-tuned branch will be skipped.')\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md("## 5. Download ToolBench splits"),
+    code(
+        "import subprocess, sys\n",
+        "p = subprocess.Popen(\n",
+        "    [sys.executable, '-u', '-m', 'sessionrerank.data.download',\n",
+        "     '--out', '/kaggle/working/sr/data'],\n",
+        "    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)\n",
+        "for line in p.stdout:\n",
+        "    print(line.rstrip(), flush=True)\n",
+        "p.wait()\n",
+        "print('download exit:', p.returncode)\n",
+    ),
+
+    # ------------------------------------------------------------------
+    md(
+        "## 6. Run the cascade (live unbuffered output)"
+    ),
+    code(
+        "import subprocess, sys, time, os\n",
+        "DEVICE = os.environ['SR_DEVICE']\n",
+        "DTYPE  = os.environ['SR_DTYPE']\n",
+        "cmd = [sys.executable, '-u', '-m', 'sessionrerank.eval.run_all',\n",
+        "       '--device', DEVICE,\n",
+        "       '--dtype',  DTYPE,\n",
+        "       '--seeds',  '0,1,2,42,123',\n",
+        "       '--pheromone',\n",
+        "       '--pheromone-rho',   '0.02',\n",
+        "       '--pheromone-tau0',  '1.0',\n",
+        "       '--pheromone-decay', '0.7',\n",
+        "       '--cooc-window',     '3',\n",
+        "       '--cross-encoder',\n",
+        "       '--checkpoint-every-method']\n",
+        "if DEVICE == 'cuda':\n",
+        "    cmd += ['--gemma-rerank', 'google/gemma-2-2b-it']\n",
+        "else:\n",
+        "    cmd += ['--skip-gemma-rerank']\n",
+        "print('+', ' '.join(cmd), flush=True)\n",
+        "t0 = time.time()\n",
+        "p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,\n",
+        "                     text=True, bufsize=1)\n",
+        "for line in p.stdout:\n",
+        "    print(line.rstrip(), flush=True)\n",
+        "p.wait()\n",
+        "print(f'\\n[cascade] exit code = {p.returncode}   elapsed = {time.time()-t0:.1f}s', flush=True)\n",
+    ),
+
+    md("## 7. Load + display metrics"),
+    code(
+        "import json, pathlib, pandas as pd\n",
+        "p = pathlib.Path('results/metrics.json')\n",
+        "if not p.exists():\n",
+        "    print('No metrics.json yet (cascade did not complete).')\n",
+        "else:\n",
+        "    m = json.loads(p.read_text())\n",
+        "    rows = []\n",
+        "    for method, splits in m.items():\n",
+        "        row = {'method': method}\n",
+        "        if isinstance(splits, dict):\n",
+        "            for split, vals in splits.items():\n",
+        "                if isinstance(vals, dict):\n",
+        "                    row[f'{split}_NDCG@5'] = vals.get('NDCG@5')\n",
+        "                    row[f'{split}_Hit@5']  = vals.get('Hit@5')\n",
+        "        rows.append(row)\n",
+        "    df = pd.DataFrame(rows).set_index('method')\n",
+        "    print(df.to_string())\n",
+        "    df.to_csv('results/metrics_summary.csv')\n",
+        "    print('\\nWrote results/metrics_summary.csv')\n",
+    ),
+
+    md("## 8. Karnataka first-hit accuracy"),
+    code(
+        "import sys, json, pathlib\n",
+        "sys.path.insert(0, '/kaggle/working/sr/agri_extension')\n",
+        "try:\n",
+        "    from sessionrerank_plus import SessionRerankPlus, FarmerProfile\n",
+        "    from karnataka_apis import KARNATAKA_APIS\n",
+        "except Exception as e:\n",
+        "    print('Karnataka extension import failed:', e)\n",
+        "    SessionRerankPlus = None\n",
+        "\n",
+        "if SessionRerankPlus is not None:\n",
+        "    ranker = SessionRerankPlus()\n",
+        "    bank = [\n",
+        "        ('My ragi crop has yellowing leaves and dry patches', 'ksda_pest_alert'),\n",
+        "        ('When can I claim crop insurance for ragi this kharif', 'pmfby'),\n",
+        "        ('What is today ragi price at Tumakuru mandi', 'agmarknet_ka'),\n",
+        "        ('Need helpline to ask about NPK dose for ragi', 'k_kisan'),\n",
+        "        ('Check my Bhoomi land record for survey number 123/4', 'bhoomi'),\n",
+        "        ('Is there a heatwave warning for Tumakuru', 'ksndmc'),\n",
+        "        ('Soil health card request for my farm', 'soil_health_card'),\n",
+        "        ('PM-KISAN installment status', 'pm_kisan'),\n",
+        "        ('Milk procurement rate today at KMF Tumkur dairy', 'kmf_nandini'),\n",
+        "        ('Offline pest identification for whitefly on tomato', 'plantix_uasb'),\n",
+        "    ]\n",
+        "    profile = FarmerProfile(crop='ragi', district='Tumakuru', language='kn', season='kharif')\n",
+        "    ranker.set_profile(profile)\n",
+        "    hits = 0\n",
+        "    per_query = []\n",
+        "    for q, gold in bank:\n",
+        "        ranked = ranker.rank(q, top_k=1)\n",
+        "        top = ranked[0]['api_id']\n",
+        "        hit = top == gold\n",
+        "        hits += int(hit)\n",
+        "        per_query.append({'query': q, 'gold': gold, 'top': top, 'hit': hit})\n",
+        "        print(f\"{'OK' if hit else '..'}  {q[:48]:48}  top={top:18}  gold={gold}\", flush=True)\n",
+        "    acc = hits / len(bank)\n",
+        "    print(f'\\nFirst-hit accuracy: {hits}/{len(bank)} = {acc:.2f}')\n",
+        "    mp = pathlib.Path('results/metrics.json')\n",
+        "    m = json.loads(mp.read_text()) if mp.exists() else {}\n",
+        "    m.setdefault('SessionRerank+', {}).setdefault('karnataka', {})['first_hit'] = acc\n",
+        "    m['SessionRerank+']['karnataka']['per_query'] = per_query\n",
+        "    mp.parent.mkdir(parents=True, exist_ok=True)\n",
+        "    mp.write_text(json.dumps(m, indent=2))\n",
+        "    print('Wrote', mp)\n",
+    ),
+
+    md(
+        "## 9. Citation\n",
+        "```\n",
+        "@misc{sessionrerank2026,\n",
+        "  title  = {SessionRerank+: A Session-Aware Re-Ranking for API Tool Retrieval in Agentic Large Language Model Systems},\n",
+        "  author = {Jenisha T and Jyothi A P},\n",
+        "  year   = {2026},\n",
+        "  url    = {https://github.com/joyjeni/session-aware-toolbench-rerank}\n",
+        "}\n",
+        "```\n",
+    ),
+]
+
+
+nb = {
+    "cells": cells,
+    "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "version": "3.10"},
+        "kaggle": {
+            "accelerator": "nvidiaTeslaT4",
+            "dataSources": [],
+            "isInternetEnabled": True,
+            "language": "python",
+            "sourceType": "notebook",
+        },
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
+}
+
+OUT.write_text(json.dumps(nb, indent=1))
+print(f"Wrote {OUT}  ({OUT.stat().st_size} bytes, {len(cells)} cells)")
