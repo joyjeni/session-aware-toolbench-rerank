@@ -377,12 +377,15 @@ def main():
                     help="HF id for the CrossEncoder rerank model.")
     ap.add_argument("--cross-encoder-topk", type=int, default=100,
                     help="Top-K from dense to feed into cross-encoder rerank.")
+        ap.add_argument("--ce", dest="cross_encoder_model", default=argparse.SUPPRESS, help="Alias for --cross-encoder-model.")
+    ap.add_argument("--ce-topk", dest="cross_encoder_topk", type=int, default=argparse.SUPPRESS, help="Alias for --cross-encoder-topk.")
     # ---- Gemma 4 extensions (opt-in; require GPU) ----------------------
     ap.add_argument("--gemma-embed", default=None,
                     help="HF id of a Gemma causal LM to use as a bi-encoder.")
     ap.add_argument("--gemma-rerank", default=None,
                     help="HF id of a Gemma instruct LM as prompted reranker.")
     ap.add_argument("--gemma-finetuned", default=None,
+                        ap.add_argument("--gemma", dest="gemma_rerank", default=argparse.SUPPRESS, help="Alias for --gemma-rerank.")
                     help="Path to merged LoRA-finetuned Gemma model.")
     ap.add_argument("--rerank-topk", type=int, default=100,
                     help="Candidate pool size for Gemma cross-encoder rerank.")
@@ -403,6 +406,7 @@ def main():
     ap.add_argument("--gemma-rerank-batch-size", type=int, default=None,
                     help="Batch size used inside GemmaPromptedReranker.score(). "
                          "Lower this (e.g. 2 or 1) to recover from CUDA OOM.")
+                        ap.add_argument("--gemma-batch-size", dest="gemma_rerank_batch_size", type=int, default=argparse.SUPPRESS, help="Alias for --gemma-rerank-batch-size.")
     ap.add_argument("--skip-gemma-rerank", action="store_true",
                     help="Mark the Gemma reranker / fine-tuned cascade as "
                          "skipped without running them. Useful to finalise "
