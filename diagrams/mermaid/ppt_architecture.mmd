@@ -1,0 +1,23 @@
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 40, "rankSpacing": 60}}}%%
+flowchart LR
+    classDef input fill:#EAF2FB,stroke:#1E5A8A,stroke-width:2px,color:#0B2545,font-weight:bold
+    classDef process fill:#2E6DA4,stroke:#0B3D62,stroke-width:2px,color:#FFFFFF,font-weight:bold
+    classDef novel fill:#0B3D62,stroke:#F5A623,stroke-width:4px,color:#FFFFFF,font-weight:bold
+    classDef output fill:#E9F7F4,stroke:#0E7C66,stroke-width:2px,color:#0B2545,font-weight:bold
+    classDef history fill:#FFF6E5,stroke:#C97E00,stroke-width:2px,color:#5C3B00,font-weight:bold
+
+    A["<b>① Farmer Query</b><br/>multi-turn session<br/><i>kn · ta · hi · en</i>"]:::input
+    B["<b>② IndicTrans2</b><br/>neural translation<br/><i>→ English</i>"]:::process
+    C["<b>③ Gemma-4 Embedding</b><br/>dense retrieval<br/><i>top-K = 100</i>"]:::process
+    H["<b>Session History H_t</b><br/><i>previously successful<br/>API calls</i>"]:::history
+    D(["★ <b>④ SessionRerank+</b><br/>Co-Activation Cache<br/><i>NOVEL component</i>"]):::novel
+    E["<b>⑤ Ranked Top-K APIs</b><br/>NDCG@5 = 0.892 (+14.7%)<br/><i>data.gov.in Karnataka</i>"]:::output
+    F["<b>Edge-Weight Update</b><br/><i>δ-increment / ρ-decay</i>"]:::history
+
+    A -->|"1"| B
+    B -->|"2"| C
+    C -->|"3"| D
+    H -->|"4"| D
+    D -->|"5"| E
+    E -.->|"6 success/fail"| F
+    F -.->|"7 reinforced"| D

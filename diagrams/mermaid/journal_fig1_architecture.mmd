@@ -1,0 +1,27 @@
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 32, "rankSpacing": 46}}}%%
+flowchart TB
+    classDef input fill:#EAF2FB,stroke:#1E5A8A,stroke-width:1.5px,color:#0B2545
+    classDef process fill:#2E6DA4,stroke:#0B3D62,stroke-width:1.5px,color:#FFFFFF,font-weight:bold
+    classDef novel fill:#0B3D62,stroke:#F5A623,stroke-width:3px,color:#FFFFFF,font-weight:bold
+    classDef output fill:#E9F7F4,stroke:#0E7C66,stroke-width:1.5px,color:#0B2545,font-weight:bold
+    classDef history fill:#FFF6E5,stroke:#C97E00,stroke-width:1.5px,color:#5C3B00
+
+    Q["① User Query q_t"]:::input
+    H["Session History H_t<br/><i>prior successful calls</i>"]:::history
+    PM["Profile Mask m(v,p)<br/><i>crop · district · season · lang</i>"]:::history
+    R["② Gemma-4 Dense Retriever<br/>s_d(q,v)"]:::process
+    Cand["③ Top-100 Candidates"]:::process
+    CO(["Co-Activation Cache<br/>φ_c(v ∣ H)"]):::novel
+    SR{{"★④ SessionRerank+<br/>score(v) = w_d·s_d + w_m·m + w_c·φ_c<br/>Eq. (1)"}}:::novel
+    OUT["⑤ Re-ranked Top-K APIs"]:::output
+    UPD["Edge-Weight Update<br/>w ← (1−ρ)w + δ·1[success]<br/>Eq. (2)"]:::history
+
+    Q -->|"1"| R
+    R -->|"2"| Cand
+    Cand -->|"3"| SR
+    H -->|"4"| CO
+    CO -->|"5"| SR
+    PM -->|"6"| SR
+    SR -->|"7"| OUT
+    OUT -.->|"8 success/fail"| UPD
+    UPD -.->|"9 reinforced edges"| CO

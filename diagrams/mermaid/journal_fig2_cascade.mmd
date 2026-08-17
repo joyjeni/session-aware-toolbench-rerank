@@ -1,0 +1,16 @@
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 26, "rankSpacing": 40}}}%%
+flowchart LR
+    classDef base fill:#EAF2FB,stroke:#1E5A8A,stroke-width:1.2px,color:#0B2545
+    classDef mid fill:#2E6DA4,stroke:#0B3D62,stroke-width:1.2px,color:#FFFFFF
+    classDef ft fill:#0B3D62,stroke:#0B3D62,stroke-width:1.2px,color:#FFFFFF
+    classDef novel fill:#0B3D62,stroke:#F5A623,stroke-width:3px,color:#FFFFFF,font-weight:bold
+
+    A["① BM25<br/><i>lexical</i><br/>0.473"]:::base
+    B["② Dense<br/><i>MiniLM</i><br/>0.800"]:::base
+    C["③ ToolRerank<br/><i>structural</i><br/>0.789"]:::mid
+    D["④ Cross-Encoder<br/><i>Sentence-BERT</i><br/>0.835"]:::mid
+    E["⑤ Gemma-4<br/><i>prompted</i><br/>0.857"]:::ft
+    F["⑥ Gemma-4<br/><i>LoRA fine-tuned</i><br/>0.881"]:::ft
+    G["★⑦ SessionRerank+<br/><i>co-activation</i><br/>0.892"]:::novel
+
+    A -->|"1"| B -->|"2"| C -->|"3"| D -->|"4"| E -->|"5"| F -->|"6"| G

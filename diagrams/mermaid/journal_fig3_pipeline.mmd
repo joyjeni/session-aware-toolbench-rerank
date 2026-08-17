@@ -1,0 +1,11 @@
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 30, "rankSpacing": 55}}}%%
+flowchart LR
+    classDef novel fill:#0B3D62,stroke:#F5A623,stroke-width:3px,color:#FFFFFF,font-weight:bold
+    classDef other fill:#EAF2FB,stroke:#1E5A8A,stroke-width:1.5px,color:#0B2545,font-weight:bold
+
+    O4["Obj4 · FCNP<br/><i>context pruning</i>"]:::other
+    O1(["★ Obj1<br/>SessionRerank+<br/><i>this paper</i>"]):::novel
+    O2["Obj2 · APRR<br/><i>multi-agent router</i>"]:::other
+
+    O4 -->|"1 pruned context / hit-miss"| O1
+    O1 -->|"2 API priority scores"| O2
