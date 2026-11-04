@@ -293,16 +293,25 @@ def iter_train_sessions(max_sessions: int | None = None,
 def build_synthetic_sessions(eval_split: list[EvalQuery],
                              *,
                              session_len: int = 3,
-                             seed: int = 0) -> list[list[EvalQuery]]:
+                             seed: int = 0,
+                             grouping: str = "category") -> list[list[EvalQuery]]:
     """Group benchmark queries into pseudo-sessions of length `session_len`.
 
-    Queries are grouped so that consecutive queries within a session share at
-    least one API *category* — emulating a coherent user session. This lets
-    us evaluate session-aware re-ranking on I2/I3-like multi-turn settings
-    using only the official benchmark labels.
+    ``grouping="category"`` (original): consecutive queries share an API
+    category. Caution: SessionRerank's largest learned weight is category
+    affinity, so this construction favours the method by design.
+    ``grouping="random"`` (control, added after the 2026-11 postdoc review):
+    sessions are random draws, so any gain must come from genuine session
+    signal rather than from how sessions were built.
     """
     import random
     rng = random.Random(seed)
+    if grouping == "random":
+        qs = list(eval_split)
+        rng.shuffle(qs)
+        return [qs[i:i + session_len] for i in range(0, len(qs), session_len)]
+    if grouping != "category":
+        raise ValueError(f"unknown grouping {grouping!r}")
     by_cat: dict[str, list[EvalQuery]] = {}
     for q in eval_split:
         cats = {a.category for a in q.candidate_apis if a.category}

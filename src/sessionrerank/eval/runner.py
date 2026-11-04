@@ -79,15 +79,21 @@ def eval_open(model, eval_split: list[EvalQuery], corpus: list[API]) -> dict:
 # Session-aware (multi-turn) evaluation
 # --------------------------------------------------------------------------- #
 def eval_session(model, eval_split: list[EvalQuery], corpus: list[API], *,
-                 use_session: bool = True, regime: str = "open") -> dict:
+                 use_session: bool = True, regime: str = "open",
+                 history: str = "predicted", grouping: str = "category",
+                 history_k: int = 2) -> dict:
     """Evaluate with simulated multi-turn sessions.
 
-    For each session, query t sees history = union of ground-truth APIs from
-    queries 1..t-1 in the same session. This rewards methods that can leverage
-    the history; baselines simply ignore the `prior` argument.
+    ``history="predicted"`` (default since the 2026-11 postdoc review): query t
+    sees the model's OWN top-``history_k`` APIs from queries 1..t-1, i.e. what a
+    deployed system would actually have called. No gold label reaches the model.
+    ``history="oracle"``: query t sees the ground-truth APIs of queries 1..t-1
+    (the original protocol). Report it only as an upper bound.
     """
+    if history not in {"predicted", "oracle"}:
+        raise ValueError(f"unknown history mode {history!r}")
     uid2api = {a.uid: a for a in corpus}
-    sessions = build_synthetic_sessions(eval_split, session_len=3)
+    sessions = build_synthetic_sessions(eval_split, session_len=3, grouping=grouping)
     per = []
     for sess in sessions:
         history_apis: list[API] = []
@@ -106,11 +112,16 @@ def eval_session(model, eval_split: list[EvalQuery], corpus: list[API], *,
                 row[f"NDCG@{k}"] = ndcg_at_k(ranked, q.relevant_uids, k)
                 row[f"Recall@{k}"] = recall_at_k(ranked, q.relevant_uids, k)
             per.append(row)
-            # update history with this query's ground-truth APIs (simulated
-            # "successful tool call" outcome).
-            for ru in q.relevant_uids:
-                if ru in uid2api:
-                    history_apis.append(uid2api[ru])
+            if history == "oracle":
+                # upper bound: the user's earlier calls were exactly the gold APIs
+                for ru in q.relevant_uids:
+                    if ru in uid2api:
+                        history_apis.append(uid2api[ru])
+            else:
+                # realistic: the system's own top-k picks become the history
+                for ru in ranked[:history_k]:
+                    if ru in uid2api:
+                        history_apis.append(uid2api[ru])
     out = aggregate(per)
     out["_per_query"] = per
     return out

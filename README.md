@@ -1,8 +1,11 @@
 # SATR — Session-aware ToolBench rerank (ACRS Objective 1)
 
 > **Ph.D. CSE, M S Ramaiah University of Applied Sciences (FET).**  
-> Scholar: Jenisha T (`24ETRP720001`). Supervisor: Dr. Jyothi A P.  
+> Scholar: Jenisha T (`24ETRP720001`). Supervisor: Dr. Padma Priya Darshini P.  
 > Integrated loop: **SATR → APRR → MNCD → FCNP** (Adaptive Context Reasoning System).
+
+
+> **Postdoctoral review (November 2026) — read first.** 2 critical issue(s) affect the results reported below; see [`docs/POSTDOC_REVIEW.md`](docs/POSTDOC_REVIEW.md) before citing any number from this repository.
 
 This repository is the **retrieval chapter** of ACRS. Given query \(q\) and session
 history \(H\), SATR returns a ranked list of ToolBench-schema tools fused with a
@@ -48,6 +51,20 @@ s(a\mid q,H)=w_{\mathrm{base}}s_{\mathrm{base}}+w_{\mathrm{cat}}\mathrm{cat}+w_{
 \[
 w_{u,v}\leftarrow(1-\rho)\,w_{u,v}+\delta\cdot\mathbf{1}[\mathrm{success}]
 \]
+
+## Evaluation protocol after the postdoc review (November 2026)
+
+```bash
+# realistic: the model's own top-2 picks become the session history (default)
+python -m sessionrerank.eval.run_all --session-history predicted --session-grouping category
+# control: sessions not built by category — any gain must come from real session signal
+python -m sessionrerank.eval.run_all --session-history predicted --session-grouping random
+# upper bound only (original protocol): gold APIs of earlier turns as history
+python -m sessionrerank.eval.run_all --session-history oracle
+```
+
+Earlier tables in `paper/results.md` were produced with oracle history and category-built sessions and
+should be re-run before citation (see `docs/POSTDOC_REVIEW.md`).
 
 ## HTTP microservice
 
